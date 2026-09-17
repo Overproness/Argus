@@ -1,0 +1,6 @@
+{
+  "name": "repo-auditor",
+  "version": "0.1.0",
+  "description": "Agentic repo auditor: maps call graphs and I/O boundaries, finds blocking-in-async, missing timeouts, I/O in loops and other extreme-case risks, and demands evidence for every finding.",
+  "keywords": ["audit", "performance", "rust", "async", "static-analysis"]
+}

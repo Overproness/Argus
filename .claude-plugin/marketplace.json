@@ -1,0 +1,14 @@
+{
+  "name": "our-agentic-workflow",
+  "owner": {
+    "name": "OurAgenticWorkflow"
+  },
+  "description": "Agentic workflows for auditing and simulating codebases.",
+  "plugins": [
+    {
+      "name": "repo-auditor",
+      "source": "./plugins/repo-auditor",
+      "description": "Agentic repo auditor for extreme cases and composition bugs."
+    }
+  ]
+}
