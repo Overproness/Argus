@@ -5,6 +5,7 @@
   auditor_cli.py index <repo> [--out DIR] [--only rust-analyzer,scip-python,...]
   auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] -- <command...>
   auditor_cli.py trace-report <repo> [--out DIR]
+  auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600]
   auditor_cli.py langs
 """
 from __future__ import annotations
@@ -39,6 +40,11 @@ def main() -> int:
     rp = sub.add_parser("trace-report", help="rebuild trace.json/trace.md from recorded traces")
     rp.add_argument("repo", type=Path)
     rp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    pp = sub.add_parser("repro", help="run reproduction tests under <out>/repros and collect evidence")
+    pp.add_argument("repo", type=Path)
+    pp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    pp.add_argument("--file", type=Path, help="run one reproduction file instead of all")
+    pp.add_argument("--timeout", type=int, default=600, help="seconds before the whole run is killed")
     sub.add_parser("langs", help="list supported languages and their SCIP indexers")
     args = ap.parse_args()
 
@@ -88,6 +94,17 @@ def main() -> int:
         print("evidence: " + ", ".join(f"{v} {k}" for k, v in sorted(data["summary"].items())))
         print(f"wrote {jp}\nwrote {mp_}")
         return 0
+
+    if args.cmd == "repro":
+        from auditor.repro import runner
+        res = runner.run(repo, out_dir, args.file.resolve() if args.file else None, args.timeout)
+        jp, mp_ = runner.write(res, out_dir)
+        counts = {}
+        for t in res["tests"]:
+            counts[t["outcome"]] = counts.get(t["outcome"], 0) + 1
+        print(", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or res["output_tail"])
+        print(f"wrote {jp}\nwrote {mp_}")
+        return 0 if res["exit_code"] in (0, 1) else 1
 
     if args.cmd == "index":
         wanted = set(args.only.split(",")) if args.only else {

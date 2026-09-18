@@ -19,7 +19,10 @@ Java, Kotlin, Scala, C#, Swift, C, C++, Ruby, PHP), plus a runtime tracer
 - hotspots;
 - runtime evidence per finding: event-loop stalls with their call stack, N+1
   fan-out counts, recursion depth, O(n^k) complexity fits, and stalls the
-  static rules did not predict.
+  static rules did not predict;
+- reproductions: an investigator subagent writes a test per finding that
+  triggers the predicted effect under controlled conditions (injected latency,
+  dead peer, scaling inputs), runs it, and reports a verdict with numbers.
 
 ```bash
 pip install -r plugins/repo-auditor/requirements.txt
@@ -30,10 +33,14 @@ python plugins/repo-auditor/scripts/auditor_cli.py index path/to/repo  # optiona
 python plugins/repo-auditor/scripts/auditor_cli.py trace path/to/repo -- python -m pytest tests
 #   -> path/to/repo/.audit/trace.{json,md}; traced program needs Python 3.12+
 python plugins/repo-auditor/scripts/auditor_cli.py trace-report path/to/repo  # rebuild from .audit/trace/*.db
+python plugins/repo-auditor/scripts/auditor_cli.py repro path/to/repo   # run .audit/repros/test_*.py -> .audit/repro.{json,md}
 
 # Try the plugin without installing it
 claude --plugin-dir plugins/repo-auditor
-#   then: /Argus:audit-map path/to/repo  and  /Argus:audit-trace path/to/repo -- <command>
+#   /Argus:audit-map path/to/repo                       static map + triage
+#   /Argus:audit-trace path/to/repo -- <command>        runtime evidence
+#   /Argus:audit-investigate path/to/repo               reproductions via the Argus:investigator agent
+#   MCP tools (any client, see plugins/repo-auditor/.mcp.json): audit_map, audit_trace, run_repro
 
 # Install it through this marketplace (inside Claude Code)
 /plugin marketplace add <path or git URL of this repo>
@@ -54,6 +61,13 @@ Layout of `plugins/repo-auditor/scripts/auditor/`:
 | `trace/run.py` | Runs a command with tracers attached through `AUDIT_TRACE_*` environment variables |
 | `trace/fit.py` | Complexity fitting: (input size, duration) samples to O(n^k) |
 | `trace/evidence.py` | Joins traces to `map.json`; writes `trace.json` and `trace.md` |
+| `repro/harness.py` | Reproduction helpers: `latency`, `hang`, `refuse_remote`, `loop_monitor`, `call_with_deadline`, `scaling`, `count_calls`; each emits `@@evidence` lines |
+| `repro/runner.py` | Runs `.audit/repros/test_*.py` under pytest, collects outcomes and evidence into `repro.{json,md}` |
+| `../hooks/guard.py` | PreToolUse guard: blocks live exchange hosts, credentials and destructive commands in audit runs and reproduction files |
+| `../mcp_server.py` | MCP server exposing `audit_map`, `audit_trace`, `run_repro` over stdio |
+
+Plugin components outside `scripts/`: `skills/audit-map`, `skills/audit-trace`,
+`skills/audit-investigate`, `agents/investigator.md`, `hooks/hooks.json`, `.mcp.json`.
 
 To add a language or library, add or extend a `LangSpec` in `langs/` and a
 fixture in `tests/fixtures/lang/`. To add a runtime adapter for another

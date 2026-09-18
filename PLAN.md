@@ -20,7 +20,7 @@ LLM only decides what to investigate. Every finding needs evidence.**
 | M1: static map (Rust) | ✅ done |
 | M1.5: every major language + precise call resolution | ✅ done. 12 languages, SCIP import, checked against rattler (Rust, 457 files, 3 s) and sktime (Python, 1,111 files, 10 s) |
 | M2: runtime observation + fault injection | in progress. Python tracer (`sys.monitoring`), SQLite store, stall detection, N+1 counts, complexity fitting, evidence report joined to the map. Next: Rust adapter, fault injection, safety hook |
-| M3: investigator agent + generated reproduction tests | planned |
+| M3: investigator agent + generated reproduction tests | ✅ Python. `investigator` subagent, `audit-investigate` skill, in-process reproduction harness (latency/hang injection, loop-lag monitor, deadlines, scaling fits, call counts), `repro` runner, PreToolUse safety guard, MCP server (`audit_map`, `audit_trace`, `run_repro`) |
 | M4: parallel investigators, passing effects in both directions, final report | planned |
 | M5: deeper verification (deterministic simulation, performance fuzzing, invariant mining) | planned |
 
@@ -252,16 +252,28 @@ what the agents decide.
   - Adapters still to write: Rust (`tracing` layer writing the same tables),
     Node (`diagnostics_channel` / `--cpu-prof`), Go (pprof), JVM (JFR), .NET
     (EventPipe). Each reads `AUDIT_TRACE_*` from `trace/run.py`.
-  - A fault-injection harness (Toxiproxy on Linux/macOS, clumsy on Windows, or
-    in-process mocks).
-  - A safety hook.
+  - Fault injection ✅ in-process for Python (`repro/harness.py`: socket-level
+    latency and hangs). Toxiproxy/clumsy for out-of-process targets: to do.
+  - Safety hook ✅ (`hooks/hooks.json`, `scripts/hooks/guard.py`).
   - Import of results from existing linters (section B) as extra evidence.
-- **M3: investigator.**
-  - A subagent that takes one hotspot or finding cluster and writes a
-    reproduction: a property test, fuzzing harness or latency-injection test.
-    It runs the reproduction and reports the evidence.
-  - An MCP server that exposes `audit_map`, `audit_trace` and `run_repro`, so
-    other tools can use it.
+- **M3: investigator.** ✅ (Python)
+  - `agents/investigator.md`: one finding in, one JSON verdict out
+    (confirmed / rejected / inconclusive) with hypothesis {trigger,
+    constraints, expected effect}, the reproduction file and measured numbers.
+  - `auditor/repro/harness.py`: `latency()`, `hang()`, `refuse_remote()`,
+    `loop_monitor()`, `call_with_deadline()`, `scaling()`, `count_calls()`;
+    every helper emits `@@evidence` lines.
+  - `auditor/repro/runner.py` + `auditor_cli.py repro`: runs
+    `.audit/repros/test_*.py` under pytest, parses JUnit XML with captured
+    stdout, writes `repro.{json,md}`. Passing means reproduced.
+  - `skills/audit-investigate`: selects findings, fans out investigators (≤3
+    parallel), aggregates with `repro`, reports verdicts.
+  - `hooks/hooks.json` + `scripts/hooks/guard.py`: PreToolUse guard blocking
+    live exchange hosts, credentials and PROD markers in audit runs, remote URLs
+    and secrets in reproduction files, and destructive commands.
+  - `.mcp.json` + `scripts/mcp_server.py`: `audit_map`, `audit_trace`, `run_repro`.
+  - Still to do: property-based and fuzzing reproductions (needs Hypothesis
+    templates), non-Python harnesses.
 - **M4: orchestration.**
   - Parallel investigators with a budget.
   - Passing value ranges downstream and latency/failures to callers.
