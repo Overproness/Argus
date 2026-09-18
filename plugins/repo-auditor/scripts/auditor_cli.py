@@ -3,11 +3,14 @@
 
   auditor_cli.py map   <repo> [--out DIR] [--include-tests] [--no-scip]
   auditor_cli.py index <repo> [--out DIR] [--only rust-analyzer,scip-python,...]
+  auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] -- <command...>
+  auditor_cli.py trace-report <repo> [--out DIR]
   auditor_cli.py langs
 """
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -27,6 +30,15 @@ def main() -> int:
     ip.add_argument("repo", type=Path)
     ip.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
     ip.add_argument("--only", help="comma-separated indexer names")
+    tp = sub.add_parser("trace", help="run a command under the runtime tracer, then report")
+    tp.add_argument("repo", type=Path)
+    tp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    tp.add_argument("--stall-ms", type=float, default=100, help="self-slice length that counts as a stall")
+    tp.add_argument("--no-shapes", action="store_true", help="do not record argument sizes")
+    tp.add_argument("command", nargs=argparse.REMAINDER, help="command to run, after --")
+    rp = sub.add_parser("trace-report", help="rebuild trace.json/trace.md from recorded traces")
+    rp.add_argument("repo", type=Path)
+    rp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
     sub.add_parser("langs", help="list supported languages and their SCIP indexers")
     args = ap.parse_args()
 
@@ -48,6 +60,34 @@ def main() -> int:
 
     repo = args.repo.resolve()
     out_dir = (args.out or repo / ".audit").resolve()
+
+    if args.cmd in ("trace", "trace-report"):
+        from auditor.trace import run as trace_run
+        from auditor.trace import store
+        trace_dir = out_dir / "trace"
+        if args.cmd == "trace":
+            command = args.command[1:] if args.command[:1] == ["--"] else args.command
+            if not command:
+                print("trace: give the command to run after `--`", file=sys.stderr)
+                return 1
+            rc = trace_run.run(repo, trace_dir, command, args.stall_ms, not args.no_shapes)
+            print(f"command exited {rc}")
+        t = store.load(trace_dir)
+        if not t.calls:
+            print(f"no trace data under {trace_dir} (is the command Python 3.12+ and inside {repo}?)",
+                  file=sys.stderr)
+            return 1
+        print(f"{len(t.runs)} traced process(es), {len(t.calls)} calls, {len(t.stalls)} stalls")
+        map_path = out_dir / "map.json"
+        if not map_path.exists():
+            print(f"no {map_path}; run `map` first to link evidence to findings", file=sys.stderr)
+            return 1
+        from auditor.trace import evidence
+        jp, mp_ = evidence.write(map_path, t, out_dir)
+        data = json.loads(jp.read_text(encoding="utf8"))
+        print("evidence: " + ", ".join(f"{v} {k}" for k, v in sorted(data["summary"].items())))
+        print(f"wrote {jp}\nwrote {mp_}")
+        return 0
 
     if args.cmd == "index":
         wanted = set(args.only.split(",")) if args.only else {

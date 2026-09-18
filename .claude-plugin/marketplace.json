@@ -1,12 +1,13 @@
 {
-  "name": "our-agentic-workflow",
+  "name": "Argus",
   "owner": {
-    "name": "OurAgenticWorkflow"
+    "name": "CODEFORGE AI Team",
+    "email" : "info@thecodeforge.dev"
   },
   "description": "Agentic workflows for auditing and simulating codebases.",
   "plugins": [
     {
-      "name": "repo-auditor",
+      "name": "Argus",
       "source": "./plugins/repo-auditor",
       "description": "Agentic repo auditor for extreme cases and composition bugs."
     }

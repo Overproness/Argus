@@ -56,7 +56,8 @@ Read `.audit/map.md`. Then, for each **high** and **medium** finding, in order:
 3. Label it **confirmed**, **rejected (reason)** or **needs-evidence**.
    Blocking-in-async and timeout findings are usually confirmable by reading the
    code. Magnitude ("how slow", "how often", "how big does n get") needs runtime
-   evidence (M2 tracing or fault injection). Say so instead of guessing.
+   evidence: for Python, run the `audit-trace` skill with a workload that
+   exercises the finding. Otherwise say so instead of guessing.
 4. Library default timeouts quoted in findings come from the tool's rule
    table. If you doubt one, check the library source or docs for the version in
    the lockfile before contradicting it.
@@ -80,3 +81,18 @@ Reply with:
 Do not add problems that are not in the map. If you notice something outside it
 while reading code, list it separately under "Unmapped observations
 (unverified)".
+
+## 4. If asked to apply a fix
+
+Default to reporting only. If the user asks you to implement a fix:
+
+- Fix only **confirmed** findings. Never write code for a rejected or
+  needs-evidence finding — propose the experiment instead.
+- Make the smallest change that removes the specific risk (the "smallest fix"
+  from the report). Do not refactor, generalize, or add abstractions,
+  config flags, or error handling beyond what the finding requires.
+- Before writing the change, state in one line why it benefits the
+  application (which extreme case it closes). If you cannot state that
+  concretely, do not write the change — flag it as needs-evidence instead.
+- One finding, one focused diff. Do not bundle unrelated cleanup into a
+  fix for a specific finding.

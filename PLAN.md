@@ -19,7 +19,7 @@ LLM only decides what to investigate. Every finding needs evidence.**
 |---|---|
 | M1: static map (Rust) | ✅ done |
 | M1.5: every major language + precise call resolution | ✅ done. 12 languages, SCIP import, checked against rattler (Rust, 457 files, 3 s) and sktime (Python, 1,111 files, 10 s) |
-| M2: runtime observation + fault injection | next |
+| M2: runtime observation + fault injection | in progress. Python tracer (`sys.monitoring`), SQLite store, stall detection, N+1 counts, complexity fitting, evidence report joined to the map. Next: Rust adapter, fault injection, safety hook |
 | M3: investigator agent + generated reproduction tests | planned |
 | M4: parallel investigators, passing effects in both directions, final report | planned |
 | M5: deeper verification (deterministic simulation, performance fuzzing, invariant mining) | planned |
@@ -242,10 +242,16 @@ what the agents decide.
 ## Milestones
 
 - **M2: observation.**
-  - `audit-trace`: tracing adapters for Rust (`tracing`), Python
-    (`sys.monitoring`), Node (`diagnostics_channel` / `--cpu-prof`), Go (pprof),
-    JVM (JFR) and .NET (EventPipe).
-  - A SQLite trace store and complexity fitting.
+  - `audit-trace` ✅ (Python): `sys.monitoring` tracer recording every repo
+    function activation in slices (self time, longest uninterrupted slice,
+    argument sizes), stalls (a self slice over the threshold on a thread
+    running an asyncio loop, with the stack), one SQLite file per process.
+    `evidence.py` joins the trace to `map.json`: confirmed / not-observed /
+    not-exercised / measured / not-verifiable per finding, unpredicted stalls,
+    N+1 fan-out per activation, recursion depth, log-log complexity fits.
+  - Adapters still to write: Rust (`tracing` layer writing the same tables),
+    Node (`diagnostics_channel` / `--cpu-prof`), Go (pprof), JVM (JFR), .NET
+    (EventPipe). Each reads `AUDIT_TRACE_*` from `trace/run.py`.
   - A fault-injection harness (Toxiproxy on Linux/macOS, clumsy on Windows, or
     in-process mocks).
   - A safety hook.
