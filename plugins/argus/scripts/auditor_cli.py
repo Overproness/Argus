@@ -3,18 +3,23 @@
 
   auditor_cli.py map   <repo> [--out DIR] [--include-tests] [--no-scip]
   auditor_cli.py index <repo> [--out DIR] [--only rust-analyzer,scip-python,...]
-  auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] [--assume ARG=N] -- <command...>
+  auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] [--assume ARG=N]
+                              [--otlp] [--heartbeat REGEX] -- <command...>
+  auditor_cli.py trace-import <repo> --otlp-file spans.json [--assume ARG=N]
   auditor_cli.py trace-report <repo> [--out DIR] [--assume ARG=N]
   auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600]
   auditor_cli.py queue <repo> [--budget 10] [--per-round 5] [--max-rounds 3] [--rule R] [--dry-run]
   auditor_cli.py record <repo> (--file verdicts.json | -)
   auditor_cli.py report <repo> [--out DIR]
+  auditor_cli.py fault-server [--latency S | --hang | --reset | --fail-first N] [--proxy HOST:PORT] [--record F]
+  auditor_cli.py probe <repo> --lang L --name N [--opt key=value ...] [--build]
   auditor_cli.py langs
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -41,7 +46,17 @@ def main() -> int:
     tp.add_argument("--no-shapes", action="store_true", help="do not record argument sizes")
     assume_help = "project cost at this input size: ARG=N, FUNCTION=N, FUNCTION.ARG=N or *=N (repeatable)"
     tp.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
-    tp.add_argument("command", nargs=argparse.REMAINDER, help="command to run, after --")
+    tp.add_argument("--otlp", action="store_true",
+                    help="receive OpenTelemetry spans from the program (any language; sets OTEL_EXPORTER_OTLP_*)")
+    tp.add_argument("--heartbeat", metavar="REGEX",
+                    help="timestamp output lines matching REGEX; long gaps between them are stalls (any language)")
+    tp.add_argument("command", nargs="*", help="command to run, after --")
+    ti = sub.add_parser("trace-import", help="import OpenTelemetry spans recorded elsewhere (OTLP JSON/protobuf files)")
+    ti.add_argument("repo", type=Path)
+    ti.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    ti.add_argument("--otlp-file", type=Path, action="append", required=True,
+                    help="collector file-exporter output, an OTLP JSON document, or raw OTLP protobuf (repeatable)")
+    ti.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
     rp = sub.add_parser("trace-report", help="rebuild trace.json/trace.md from recorded traces")
     rp.add_argument("repo", type=Path)
     rp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
@@ -69,8 +84,29 @@ def main() -> int:
     fp = sub.add_parser("report", help="final report from map, trace, repro and verdicts: report.{json,md,html}")
     fp.add_argument("repo", type=Path)
     fp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    sub.add_parser("fault-server", add_help=False,
+                   help="stand-in for a remote dependency with injected faults (any language); --help for flags")
+    np_ = sub.add_parser("probe", help="scaffold a native probe side project for a language; prints how to run it")
+    np_.add_argument("repo", type=Path)
+    np_.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit); probes go to <out>/repros/native")
+    np_.add_argument("--lang", required=True)
+    np_.add_argument("--name", required=True, help="probe name: letters, digits, underscores")
+    np_.add_argument("--opt", action="append", default=[], metavar="KEY=VALUE",
+                     help="scaffold option (crate=, module=, project=, sources=a.c,b.c, classpath=...)")
+    np_.add_argument("--build", action="store_true", help="also build it now")
     sub.add_parser("langs", help="list supported languages and their SCIP indexers")
-    args = ap.parse_args()
+    if sys.argv[1:2] == ["fault-server"]:  # its flags are its own
+        from auditor.repro import faults
+        return faults.main(sys.argv[2:])
+    argv = sys.argv[1:]
+    passthrough: list[str] | None = None
+    if argv[:1] == ["trace"] and "--" in argv:
+        # Everything after `--` belongs to the traced program, flags included.
+        cut = argv.index("--")
+        argv, passthrough = argv[:cut], argv[cut + 1:]
+    args = ap.parse_args(argv)
+    if passthrough is not None:
+        args.command = passthrough
 
     try:
         from auditor import report, scip
@@ -91,27 +127,43 @@ def main() -> int:
     repo = args.repo.resolve()
     out_dir = (args.out or repo / ".audit").resolve()
 
-    if args.cmd in ("trace", "trace-report"):
+    if args.cmd in ("trace", "trace-report", "trace-import"):
+        from auditor.trace import otlp, spans, store
         from auditor.trace import run as trace_run
-        from auditor.trace import store
         trace_dir = out_dir / "trace"
+        map_path = out_dir / "map.json"
+        if not map_path.exists():
+            print(f"no {map_path}; run `map` first to link evidence to findings", file=sys.stderr)
+            return 1
         if args.cmd == "trace":
             command = args.command[1:] if args.command[:1] == ["--"] else args.command
             if not command:
                 print("trace: give the command to run after `--`", file=sys.stderr)
                 return 1
-            rc = trace_run.run(repo, trace_dir, command, args.stall_ms, not args.no_shapes)
+            if args.otlp and "OTEL_INSTRUMENTATION_METHODS_INCLUDE" not in os.environ:
+                # The Java agent spans a repo's own methods only when named: name the ones findings are about.
+                methods = spans.jvm_methods_include(json.loads(map_path.read_text(encoding="utf8")))
+                if methods:
+                    os.environ["OTEL_INSTRUMENTATION_METHODS_INCLUDE"] = methods
+                    print(f"otlp: Java agent method spans for {methods.count('[')} class(es) from the map")
+            rc = trace_run.run(repo, trace_dir, command, args.stall_ms, not args.no_shapes,
+                               otlp=args.otlp, heartbeat=args.heartbeat)
             print(f"command exited {rc}")
-        t = store.load(trace_dir)
-        if not t.calls:
-            print(f"no trace data under {trace_dir} (is the command Python 3.12+ and inside {repo}?)",
-                  file=sys.stderr)
+        if args.cmd == "trace-import":
+            import time as _time
+            n = 0
+            for i, f in enumerate(args.otlp_file):
+                got = otlp.load_file(f)
+                otlp.write_jsonl(got, trace_dir / f"import-{int(_time.time())}-{i}.spans.jsonl",
+                                 {"argv": [f"imported from {f.name}"]})
+                n += len(got)
+            print(f"imported {n} span(s) from {len(args.otlp_file)} file(s)")
+        t = spans.attach(store.load(trace_dir), trace_dir, json.loads(map_path.read_text(encoding="utf8")), repo)
+        if not (t.calls or t.stalls or t.io):
+            print(f"no trace data under {trace_dir}. Python programs need 3.12+; for other languages run with "
+                  f"--otlp (an OpenTelemetry-instrumented program) and/or --heartbeat REGEX", file=sys.stderr)
             return 1
-        print(f"{len(t.runs)} traced process(es), {len(t.calls)} calls, {len(t.stalls)} stalls")
-        map_path = out_dir / "map.json"
-        if not map_path.exists():
-            print(f"no {map_path}; run `map` first to link evidence to findings", file=sys.stderr)
-            return 1
+        print(f"{len(t.runs)} run(s), {len(t.calls)} calls, {len(t.io)} external calls, {len(t.stalls)} stalls")
         from auditor.trace import evidence
         try:
             scale = {k.strip(): float(v) for k, v in (a.split("=", 1) for a in args.assume)}
@@ -122,6 +174,24 @@ def main() -> int:
         data = json.loads(jp.read_text(encoding="utf8"))
         print("evidence: " + ", ".join(f"{v} {k}" for k, v in sorted(data["summary"].items())))
         print(f"wrote {jp}\nwrote {mp_}")
+        return 0
+
+    if args.cmd == "probe":
+        from dataclasses import asdict
+
+        from auditor.repro import native
+        opts = {}
+        for kv in args.opt:
+            k, _, v = kv.partition("=")
+            opts[k] = v.split(",") if k in ("sources", "includes", "flags", "classpath", "deps") else v
+        try:
+            probe = native.scaffold(args.lang, args.name, repo=repo, out_dir=out_dir / "repros" / "native", **opts)
+            if args.build:
+                native.build_probe(probe)
+        except (ValueError, RuntimeError, FileNotFoundError) as e:
+            print(f"probe: {e}", file=sys.stderr)
+            return 1
+        print(json.dumps({k: (str(v) if isinstance(v, Path) else v) for k, v in asdict(probe).items()}, indent=2))
         return 0
 
     if args.cmd in ("queue", "record", "report"):

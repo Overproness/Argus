@@ -1,0 +1,9 @@
+[package]
+name = "argus-fixture-client"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]

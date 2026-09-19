@@ -314,7 +314,7 @@ class Effects:
             for lp, att in self.retry_loops(fn):
                 layers_here.append(("loop", lp.line, att, "none" if lp.sleep_s is None else
                                     ("exponential" if lp.exponential else "fixed")))
-            if fn.retry and fn.lang in ("python", "java", "kotlin", "scala"):
+            if fn.retry and fn.lang in ("python", "java", "kotlin", "scala", "ruby"):
                 if self._io_in(fn, fn.line, fn.end_line):
                     layers_here.append(("decorator", fn.line, fn.retry[0], fn.retry[1]))
             for kind, line, att, backoff in layers_here:

@@ -5,8 +5,14 @@ Claude Code plugin marketplace for agentic code-audit workflows, by the CODEFORG
 ## Argus (plugin)
 
 A static audit map for 12 languages (Rust, Python, JavaScript/TypeScript, Go,
-Java, Kotlin, Scala, C#, Swift, C, C++, Ruby, PHP), plus a runtime tracer
-(Python for now) that turns the map's findings into evidence. It produces:
+Java, Kotlin, Scala, C#, Swift, C, C++, Ruby, PHP), plus runtime observation
+that turns the map's findings into evidence in any language:
+- a built-in function tracer for Python;
+- an OpenTelemetry receiver for everything instrumented (the Java or .NET
+  agent, or any SDK);
+- heartbeat stalls for any program that prints.
+
+It produces:
 
 - the call graph;
 - a list of every I/O and external call (network, database, filesystem, sleeps,
@@ -32,10 +38,18 @@ Java, Kotlin, Scala, C#, Swift, C, C++, Ruby, PHP), plus a runtime tracer
   - Go I/O errors discarded with `_`;
 - scaling projections: super-linear functions projected to the largest input
   seen upstream, or to a size given with `--assume`;
-- reproductions: an investigator subagent writes a test per finding that
-  triggers the predicted effect under controlled conditions (injected latency,
-  dead peer, simulated outage, scaling inputs), runs it, and reports a verdict
-  with numbers;
+- reproductions in any language: an investigator subagent writes a test per
+  finding that triggers the predicted effect under controlled conditions
+  (injected latency, dead peer, simulated outage, scaling inputs), runs it, and
+  reports a verdict with numbers:
+  - Python code runs in-process;
+  - every other language runs against the **fault server** (a local mock API
+    or TCP proxy that injects faults and counts connections), either as a
+    black-box run of the real program or as a **native probe**: a small
+    program in the target language, in a side project that depends on the repo
+    by path;
+  - probes are verified for Rust, JavaScript, Java, C#, C and C++; templates
+    exist for Go, TypeScript, Kotlin, Scala, Swift, Ruby and PHP;
 - budgeted rounds (M4): a deterministic queue picks what to reproduce next,
   follows confirmed effects up to their callers, and suppresses findings whose
   call edge an investigator rejected;
@@ -50,12 +64,17 @@ python plugins/argus/scripts/auditor_cli.py langs             # supported langua
 python plugins/argus/scripts/auditor_cli.py map path/to/repo  # -> path/to/repo/.audit/map.{json,md}
 python plugins/argus/scripts/auditor_cli.py index path/to/repo  # optional: SCIP indexes for precise calls
 python plugins/argus/scripts/auditor_cli.py trace path/to/repo -- python -m pytest tests
-#   -> path/to/repo/.audit/trace.{json,md}; traced program needs Python 3.12+
+#   -> path/to/repo/.audit/trace.{json,md}; Python 3.12+ is traced function by function
+python plugins/argus/scripts/auditor_cli.py trace path/to/repo --otlp --heartbeat "tick" -- java -javaagent:otel.jar -jar app.jar
+#   any language: OpenTelemetry spans + stalls from gaps between "tick" lines
+python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --otlp-file collector-dump.json
 python plugins/argus/scripts/auditor_cli.py trace-report path/to/repo --assume rows=50000  # rebuild, project sizes
 python plugins/argus/scripts/auditor_cli.py repro path/to/repo   # run .audit/repros/test_*.py -> .audit/repro.{json,md}
 python plugins/argus/scripts/auditor_cli.py queue path/to/repo --budget 10 --per-round 5 --max-rounds 3
 python plugins/argus/scripts/auditor_cli.py record path/to/repo --file verdicts.json   # or --file - for stdin
 python plugins/argus/scripts/auditor_cli.py report path/to/repo  # -> .audit/report.{json,md,html}
+python plugins/argus/scripts/auditor_cli.py fault-server --hang --record conns.jsonl   # point any program at it
+python plugins/argus/scripts/auditor_cli.py probe path/to/repo --lang rust --name fetch --build  # native probe side project
 
 # Try the plugin without installing it
 claude --plugin-dir plugins/argus
@@ -84,10 +103,15 @@ Layout of `plugins/argus/scripts/auditor/`:
 | `report.py` | `map.json` and `map.md` output |
 | `trace/store.py` | SQLite trace store: one file per traced process, merged on read |
 | `trace/py/tracer.py` | Python tracer (`sys.monitoring`): per-call timing in slices, self time, event-loop stalls, argument sizes |
-| `trace/run.py` | Runs a command with tracers attached through `AUDIT_TRACE_*` environment variables |
+| `trace/run.py` | Runs a command with tracers attached through `AUDIT_TRACE_*` environment variables, an OTLP receiver (`--otlp`) and heartbeat capture (`--heartbeat`) |
+| `trace/otlp.py` | OpenTelemetry in, from any language: OTLP/HTTP receiver (protobuf and JSON, gzip) and file importer |
+| `trace/spans.py` | Spans mapped to map functions; client spans as observed external calls; heartbeat gaps as stalls attributed to the deepest covering span |
+| `protowire.py` | Minimal protobuf wire reader shared by the SCIP and OTLP decoders (no protobuf dependency) |
 | `trace/fit.py` | Complexity fitting: (input size, duration) samples to O(n^k) |
 | `trace/evidence.py` | Joins traces to `map.json`; writes `trace.json` and `trace.md` |
 | `repro/harness.py` | Reproduction helpers: `latency`, `hang`, `fail_connect`, `count_connects`, `refuse_remote`, `loop_monitor`, `call_with_deadline`, `scaling`, `count_calls`; each emits `@@evidence` lines |
+| `repro/faults.py` | Fault server for any language: a mock HTTP API or TCP proxy with latency, hang, reset and fail-first-N; records every connection |
+| `repro/native.py` | `run_target` (run and observe any program: deadline, exit code, heartbeat gaps, `@@evidence` lines, process-tree kill) and native probe scaffolds for 13 languages |
 | `repro/runner.py` | Runs `.audit/repros/test_*.py` under pytest, collects outcomes and evidence into `repro.{json,md}` |
 | `orchestrate.py` | The round loop: ranked, budgeted queue with follow-ups and suppression; verdict ledger checked against repro results; final report data |
 | `report_html.py` | `report.json`, `report.md` and a self-contained, theme-aware `report.html` (publishable as a claude.ai artifact) |
@@ -102,9 +126,14 @@ Files under `<repo>/.audit/`: `map.*` (static), `scip/` (indexes), `trace/` and
 current round), `verdicts.json` (the ledger: budget, rounds, verdicts,
 follow-ups), and `report.*` (final).
 
+**Every capability must work in every language.** [PLAN.md](PLAN.md#language-parity)
+keeps a parity matrix of which language has which capability, verified or not.
 To add a language or library, add or extend a `LangSpec` in `langs/` and a
-fixture in `tests/fixtures/lang/`. To add a runtime adapter for another
-language, write the `calls` and `stalls` tables from `trace/store.py` and read
-the `AUDIT_TRACE_*` variables set by `trace/run.py`.
+fixture in `tests/fixtures/lang/`, and add a probe scaffold in
+`repro/native.py` with a test in `tests/test_native.py`. To add a runtime
+adapter for another language, write the `calls` and `stalls` tables from
+`trace/store.py` and read the `AUDIT_TRACE_*` variables set by `trace/run.py`.
 
-Tests: `python -m pytest tests`. The SCIP test runs when `rust-analyzer` is installed.
+Tests: `python -m pytest tests`. Toolchain-dependent tests (SCIP via
+rust-analyzer; native probes via cargo, node, javac, dotnet, gcc and g++) skip
+when the toolchain is missing.

@@ -1,6 +1,6 @@
 ---
 name: audit-investigate
-description: Verify audit findings by reproduction, one round. The deterministic queue ranks findings from .audit/map.json (and .audit/trace.json evidence when present); one investigator subagent per queued finding writes and runs a test that triggers the predicted effect under controlled conditions (latency injection, dead peer, simulated outage, scaling inputs) and reports a verdict with numbers, which is recorded in the verdict ledger. Use after audit-map or audit-trace when the user wants findings proven, asks "is this real", or wants reproduction tests. For several rounds and a final report, use the `audit` skill.
+description: Verify audit findings by reproduction, one round, in any language. The deterministic queue ranks findings from .audit/map.json (and .audit/trace.json evidence when present); one investigator subagent per queued finding writes and runs a test that triggers the predicted effect under controlled conditions (latency injection, dead peer, simulated outage, scaling inputs). Python runs in-process; every other language runs against the fault server as a black-box program or a native probe. Each reports a verdict with numbers, recorded in the verdict ledger. Use after audit-map or audit-trace when the user wants findings proven, asks "is this real", or wants reproduction tests. For several rounds and a final report, use the `audit` skill.
 argument-hint: "[repo path] [--max N] [--rule blocking-in-async,...]"
 ---
 
@@ -26,10 +26,11 @@ queue:
 - merges findings that share a leaf;
 - skips findings with verdicts, `info`/`low` severity, and `not-observed`
   evidence;
-- skips languages without a harness (only Python has one).
+- queues every language, with a `harness` field per item: Python in-process;
+  other languages through the fault server, with a black-box run of the real
+  program or a native probe.
 
-Read `.audit/queue.json`. Tell the user what was skipped and why, especially
-non-Python findings, which need a harness that does not exist yet.
+Read `.audit/queue.json` and tell the user what was skipped and why.
 
 ## 2. Run investigators
 
@@ -59,8 +60,9 @@ A table: finding · verdict · trigger · measured effect · extreme case ·
 smallest fix · repro file. Then:
 
 - **Rejected** findings with the investigator's reason. These improve the rules.
-- **Inconclusive** findings with what blocked them (a missing mock, a
-  non-Python target).
+- **Inconclusive** findings with what blocked them: a missing toolchain, a
+  dependency URL that cannot be pointed at the fault server, or real
+  infrastructure the code needs.
 - The reproduction files stay under `.audit/repros/`, so the user can move the
   useful ones into the test suite.
 - `report "<repo>"` writes the combined report (`.audit/report.html`) whenever

@@ -23,6 +23,8 @@ BLOCKISH = frozenset({
     "control_structure_body", "constructor_body", "switch_block", "match_block",
 })
 BODY_TYPES = ("function_body", "block", "compound_statement", "statement_block", "body_statement")
+LOOP_BODIES = frozenset({"statements", "control_structure_body", "block", "compound_statement", "statement_block",
+                         "body_statement", "do_block"})
 NAME_TYPES = ("identifier", "field_identifier", "qualified_identifier", "destructor_name",
               "operator_name", "scoped_identifier")
 CONTAINER_NAME_TYPES = ("type_identifier", "identifier", "simple_identifier", "constant", "name",
@@ -237,8 +239,12 @@ _UNTIMED_CLIENT = re.compile(
 _TIMEOUT_WITH = re.compile(r"\b(asyncio\.timeout|timeout_at|async_timeout\.timeout|move_on_after|fail_after)\(")
 _HANDLES = re.compile(
     r"\b(try|except|catch|rescue)\b|\bErr\s*\(|\.is_err\(\)|\.is_ok\(\)|if let Ok|if let Err|"
-    r"err\s*[!=]=\s*nil|\.catch\(|\.isFailure|\.onFailure|\bresult\.err\b"
+    r"err\s*[!=]=\s*nil|\.catch\(|\.isFailure|\.onFailure|\bresult\.err\b|"
+    r"\b(CURLE_OK|SQLITE_OK|EAGAIN|EINTR|errno)\b"  # C return-code checks
 )
+# Ruby: `rescue ... retry if (tries += 1) < 3` re-runs the begin block.
+_RUBY_RETRY = re.compile(r"\brescue\b[\s\S]*?\bretry\b[^\n]*")
+_RUBY_TRIES = re.compile(r"\(?\s*(\w+)\s*\+=\s*1\s*\)?\s*<=?\s*(\d+)|\b(\w+)\s*<\s*(\d+)")
 _SLEEPY = re.compile(r"(?i)(^|\.)(sleep|usleep|delay|sleep_for|sleep_until|backoff|wait_exponential)$")
 _EXPO = re.compile(r"\*\*|\bpow\(|\.pow\(|<<|\*=\s*2|\bexponential|\bexpo\b|\bbackoff|checked_mul|saturating_mul|"
                    r"Math\.pow|math\.Pow|\*\s*2\b")
@@ -252,8 +258,8 @@ _COUNT_PATTERNS = [
     # Rust / Swift / Kotlin / Scala: 0..5, 0..=5, 0..<5, 0 until 5, 1 to 5
     (re.compile(r"\bin\s+\(?\s*([\w.]+)\s*(\.\.=|\.\.<|\.\.|until|to)\s*([\w.]+)|<-\s*([\w.]+)\s*(until|to)\s*([\w.]+)"),
      "rangeop"),
-    # C-like / Go / JS / Java: i = 0; i < 5;
-    (re.compile(r"(?:=|:=)\s*(\d+)\s*;\s*\w+\s*(<=?)\s*([\w.]+)\s*;"), "cfor"),
+    # C-like / Go / JS / Java / PHP: i = 0; i < 5;   ($i in PHP)
+    (re.compile(r"(?:=|:=)\s*(\d+)\s*;\s*\$?\w+\s*(<=?)\s*([\w.$]+)\s*;"), "cfor"),
 ]
 _POLICY_BOUND = re.compile(
     r"(?i)\b\w*(retr(y|ies)|attempts?|tries)\w*\s*(>=?|<=?|==)\s*[\w.]+|"
@@ -314,6 +320,17 @@ def _retry_decorator(text_: str) -> tuple[int | None, str] | None:
         backoff = "exponential"  # backoff.on_exception always takes a wait generator
     else:
         backoff = "none"
+    return attempts, backoff
+
+
+def _ruby_retry(body: str) -> tuple[int | None, str] | None:
+    m = _RUBY_RETRY.search(body)
+    if not m:
+        return None
+    clause = m.group(0)
+    t = _RUBY_TRIES.search(clause)
+    attempts = int(t.group(2) or t.group(4)) if t else None  # a bare `retry` retries forever
+    backoff = ("exponential" if _EXPO.search(clause) else "fixed") if re.search(r"\bsleep\b", clause) else "none"
     return attempts, backoff
 
 
@@ -470,6 +487,8 @@ class FileExtractor:
         else:
             fn.arity, fn.takes_self = _arity(spec, node, cont is not None)
         fn.retry = _retry_decorator(prefix + "\n" + header)
+        if spec.name == "ruby" and fn.retry is None and body is not None:
+            fn.retry = _ruby_retry(text(body))
         scan = body if body is not None else node
         nesting = 0
         stack = [(scan, 0)]
@@ -497,6 +516,8 @@ class FileExtractor:
 
     def _loop_info(self, n: Node) -> LoopInfo:
         body = n.child_by_field_name("body")
+        if body is None:  # Swift/Kotlin: the loop body is a plain child, not a field
+            body = next((c for c in reversed(n.named_children) if c.type in LOOP_BODIES), None)
         header = _header(n, body) if body is not None else text(n).split("\n", 1)[0]
         body_text = text(body)[:8000] if body is not None else ""
         if _loop_kind(n) == "forever":

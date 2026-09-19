@@ -26,7 +26,7 @@ DESTRUCTIVE = re.compile(
 )
 REMOTE_URL = re.compile(r"(?i)\b(https?|wss?)://(?!(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(:|/|$))[\w.-]+")
 SAFE_HOST_HINT = re.compile(r"(?i)(testnet|sandbox|paper|mock|example\.(com|org|net))")
-AUDIT_CMD = re.compile(r"auditor_cli\.py\s+(trace|repro)\b")
+AUDIT_CMD = re.compile(r"auditor_cli\.py\s+(trace|repro|fault-server|probe)\b")
 
 
 def check(tool: str, inp: dict) -> str | None:

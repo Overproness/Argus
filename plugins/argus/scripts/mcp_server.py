@@ -46,30 +46,36 @@ def audit_map(repo: str, include_tests: bool = False, out: str | None = None, ma
 
 @server.tool()
 def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bool = True,
-                out: str | None = None, assume: dict[str, float] | None = None) -> dict:
-    """Run `command` (argv list) under the Python runtime tracer and join the trace to map.json. Writes .audit/trace.{json,md}.
+                out: str | None = None, assume: dict[str, float] | None = None, otlp: bool = False,
+                heartbeat: str | None = None) -> dict:
+    """Run `command` (argv list) under runtime observation and join the evidence to map.json. Writes .audit/trace.{json,md}.
 
+    Python 3.12+ programs are traced function by function automatically. Any language: `otlp=True` receives
+    OpenTelemetry spans (the program must be instrumented: Java/.NET agent, Node/Python/Go/... SDK), and
+    `heartbeat` (a regex for the program's periodic output lines) turns gaps between them into stalls.
     `assume` projects super-linear functions to input sizes you expect in production, e.g. {"rows": 50000}.
     """
-    from auditor.trace import evidence, run as trace_run, store
+    from auditor.trace import evidence, spans, store
+    from auditor.trace import run as trace_run
 
     root = Path(repo).resolve()
     out_dir = _out(root, out)
     map_path = out_dir / "map.json"
     if not map_path.exists():
         return {"error": f"{map_path} missing; call audit_map first"}
-    rc = trace_run.run(root, out_dir / "trace", command, stall_ms, shapes)
-    t = store.load(out_dir / "trace")
-    if not t.calls:
-        return {"error": "no trace data recorded (traced program must be Python 3.12+ inside the repo)",
-                "exit_code": rc}
+    rc = trace_run.run(root, out_dir / "trace", command, stall_ms, shapes, otlp=otlp, heartbeat=heartbeat)
+    t = spans.attach(store.load(out_dir / "trace"), out_dir / "trace",
+                     json.loads(map_path.read_text(encoding="utf8")), root)
+    if not (t.calls or t.stalls or t.io):
+        return {"error": "no trace data recorded: Python programs need 3.12+; other languages need otlp=True with "
+                         "an OpenTelemetry-instrumented program and/or a heartbeat regex", "exit_code": rc}
     jp, mp = evidence.write(map_path, t, out_dir, assume)
     data = json.loads(jp.read_text(encoding="utf8"))
     return {"exit_code": rc, "trace_json": str(jp), "trace_md": str(mp), "summary": data["summary"],
             "findings": [{k: f[k] for k in ("rule", "severity", "function", "file", "line")} | {"evidence": f["evidence"]}
                          for f in data["findings"]],
             "unpredicted_stalls": data["unpredicted_stalls"], "complexity": data["complexity"],
-            "projections": data["projections"]}
+            "projections": data["projections"], "external_calls": data["external_calls"]}
 
 
 @server.tool()

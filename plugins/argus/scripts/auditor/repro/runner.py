@@ -1,8 +1,10 @@
 """Run reproduction tests and collect their outcomes and evidence.
 
-Reproductions live in `<out>/repros/test_*.py`. Each is a pytest file; the
-`harness` helpers print `@@evidence {...}` lines, which pytest captures per test
-into the JUnit XML this runner parses. A test that *fails* when the predicted
+Reproductions live in `<out>/repros/test_*.py`. Each is a pytest file, whatever
+the audited language: Python code is exercised in-process, other languages
+through `native` (black-box runs and native probes) against a `faults`
+server. The helpers, and any program they run, print `@@evidence {...}` lines,
+which pytest captures per test into the JUnit XML this runner parses. A test that *fails* when the predicted
 effect appears is the wrong shape: write assertions so that **passing means
 the finding is reproduced**, and use `evidence(...)` for the numbers.
 """
@@ -26,6 +28,7 @@ def run_pytest(repo: Path, files: list[Path], junit: Path, timeout: int) -> tupl
     env["PYTHONPATH"] = os.pathsep.join([str(SCRIPTS_DIR), str(repo)] + (
         [env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     env["AUDIT_REPRO"] = "1"
+    env["ARGUS_REPO"] = str(repo)  # native.repo_root(): where probes and black-box runs find the code
     cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--tb=short", "-o", "addopts=",
            "-o", "junit_logging=system-out", f"--junitxml={junit}", *map(str, files)]
     try:

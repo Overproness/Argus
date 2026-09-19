@@ -18,7 +18,6 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-HARNESS_LANGS = {"python"}  # languages the investigator can reproduce in (repro/harness.py)
 SEV_W = {"high": 5.0, "medium": 3.0, "low": 1.0, "info": 0.5}
 CONF_W = {"exact": 1.0, "scip": 1.0, "unique": 0.9, "heuristic": 0.8, "name": 0.5}
 EVID_W = {"confirmed": 1.5, "measured": 1.2, "not-verifiable": 1.0, "not-exercised": 1.0, "not-observed": 0.3}
@@ -29,6 +28,18 @@ DEFAULT_BUDGET = {"total": 10, "per_round": 5, "max_rounds": 3}
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def harness_for(lang: str) -> str:
+    """How the investigator can reproduce a finding in this language (every language has at least one way)."""
+    from .repro.native import SCAFFOLDS, VERIFIED
+    if lang == "python":
+        return "in-process (repro/harness.py), or black-box"
+    if lang in VERIFIED:
+        return "native probe or black-box"
+    if lang in SCAFFOLDS:
+        return "native probe (template not yet verified on a toolchain) or black-box"
+    return "black-box"
 
 
 def finding_id(f: dict) -> str:
@@ -163,12 +174,11 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
             reason = f"suppressed: its chain uses the call edge rejected in {sup}"
         elif (c.get("trace_evidence") or {}).get("status") == "not-observed" and not rules:
             reason = "trace: not-observed under the recorded workload"
-        elif c["lang"] not in HARNESS_LANGS:
-            reason = f"no reproduction harness for {c['lang']} yet"
         if reason:
             skipped.append({"id": fid, "reason": reason, "severity": c["severity"], "lang": c["lang"]})
             continue
         c["score"] = _score(c, st)
+        c["harness"] = harness_for(c["lang"])
         items.append(c)
 
     # One investigation per underlying effect: same rule and same leaf function.

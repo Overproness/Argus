@@ -12,13 +12,21 @@ def _import_text(node) -> str:
     return s
 
 
+def _record(out: dict, spec: str):
+    wild = re.sub(r"\s+", "", spec)
+    if wild.endswith((".*", "._")):  # a wildcard import still tells library rules the package is in use
+        out["\0" + wild[:-2]] = wild[:-2]
+        return
+    for alias, full in expand_braced(spec, "."):
+        out[alias] = full
+        out["\0" + full] = full
+
+
 def java_imports(root):
     out = {}
     for n in walk(root):
         if n.type == "import_declaration":
-            for alias, full in expand_braced(_import_text(n), "."):
-                out[alias] = full
-                out["\0" + full] = full
+            _record(out, _import_text(n))
     return out
 
 
@@ -26,9 +34,7 @@ def kotlin_imports(root):
     out = {}
     for n in walk(root):
         if n.type == "import_header":
-            for alias, full in expand_braced(_import_text(n), "."):
-                out[alias] = full
-                out["\0" + full] = full
+            _record(out, _import_text(n))
     return out
 
 
@@ -37,9 +43,7 @@ def scala_imports(root):
     for n in walk(root):
         if n.type == "import_declaration":
             for spec in re.split(r",\s*(?![^{]*\})", _import_text(n)):
-                for alias, full in expand_braced(spec, "."):
-                    out[alias] = full
-                    out["\0" + full] = full
+                _record(out, spec)
     return out
 
 

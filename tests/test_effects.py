@@ -102,6 +102,37 @@ def test_go_effects(maps):
     assert not any(f.function == "withDeadline" for f in m.findings if f.rule == "io-without-timeout")
 
 
+MORE_LANGS = {
+    "javascript": [("retry-without-backoff", "quotes.fetchQuote", 4)],
+    "typescript": [("retry-without-backoff", "quotes.fetchQuote", 4)],
+    "java": [("retry-without-backoff", "demo.Poller.fetch", 14), ("hang-reaches-entry", "demo.Poller.main", 24)],
+    "kotlin": [("deadline-cannot-preempt", "demo.Prices.guarded", 14)],  # withTimeout around a blocking call
+    "scala": [("retry-without-backoff", "Quotes.fetch", 6)],  # sttp via a wildcard import
+    "csharp": [("deadline-cannot-preempt", "Services.Feed.Guarded", 34),  # WaitAsync around Thread.Sleep
+               ("retry-without-backoff", "Services.Feed.Quote", 13)],
+    "swift": [("retry-without-backoff", "Sources.App.Quotes.fetch", 7)],
+    "c": [("retry-without-backoff", "fetch::fetch", 4)],  # CURLE_OK check counts as error handling
+    "cpp": [("retry-without-backoff", "fetch::fetch", 6)],
+    "ruby": [("retry-without-backoff", "app.Quotes.fetch", 4),  # rescue ... retry if (tries += 1) < 3
+             ("unbounded-retry", "app.Quotes.fetch_forever", 14)],  # rescue; sleep; retry
+    "php": [("retry-without-backoff", "Quotes.fetch", 13)],  # for ($i = 0; $i < 3; $i++)
+}
+
+
+@pytest.mark.parametrize("lang", sorted(MORE_LANGS))
+def test_effects_in_every_language(lang):
+    m = RepoMap(FX / lang).load()
+    assert not m.parse_errors
+    have = {(f.rule, f.function, f.line) for f in m.findings}
+    missing = [x for x in MORE_LANGS[lang] if x not in have]
+    assert not missing, f"missing {missing}; have {sorted(have)}"
+
+
+def test_backoff_is_recognised_in_javascript():
+    m = RepoMap(FX / "javascript").load()
+    assert not any(f.function == "quotes.fetchQuoteBackoff" and "retry" in f.rule for f in m.findings)
+
+
 def test_tick_loops_are_not_retries(maps):
     # rust main's `loop {}` and go main's `for {}` poll forever but are service loops, not retries.
     for lang in ("rust", "go"):

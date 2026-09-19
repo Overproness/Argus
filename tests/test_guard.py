@@ -19,6 +19,7 @@ def hook(tool, **tool_input):
     "python auditor_cli.py trace . -- python bot.py --exchange api.binance.com",
     "BINANCE_API_KEY=abc python auditor_cli.py trace . -- python bot.py",
     "ENV=PROD python auditor_cli.py repro .",
+    "python auditor_cli.py fault-server --proxy api.binance.com:443",
     "rm -rf / --no-preserve-root",
     "git push --force origin main",
 ])
@@ -30,6 +31,7 @@ def test_blocked_commands(cmd):
 @pytest.mark.parametrize("cmd", [
     "python auditor_cli.py trace . -- python -m pytest tests",
     "python auditor_cli.py trace . -- python bot.py --exchange testnet.binance.vision",
+    "python auditor_cli.py fault-server --hang --proxy 127.0.0.1:5432",
     "curl https://api.binance.com/api/v3/time",  # not an audit run: user's business
     "ls -la",
 ])
@@ -44,6 +46,13 @@ def test_repro_file_with_remote_url_blocked():
     assert rc == 0
     rc, err = hook("Write", file_path="/r/.audit/repros/test_x.py", content="urlopen('https://internal.corp/x')")
     assert rc == 2 and "remote URL" in err
+
+
+def test_native_probe_files_are_guarded_too():
+    path = "/r/.audit/repros/native/rust/client/src/main.rs"
+    rc, err = hook("Write", file_path=path, content='fetch("https://api.bybit.com/v5/market/time")')
+    assert rc == 2 and "live exchange" in err
+    assert hook("Write", file_path=path, content='fetch(&std::env::var("ARGUS_FAULT_URL").unwrap())')[0] == 0
 
 
 def test_repro_file_with_secret_blocked():

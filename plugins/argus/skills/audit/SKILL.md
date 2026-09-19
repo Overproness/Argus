@@ -31,12 +31,22 @@ minutes.
 
 ## 2. Trace (optional)
 
-This step needs Python 3.12+ in the traced program. If the user gave a workload
-after `--`, or the repo has an obvious test suite and the user agrees, run
-`trace "<repo>" -- <command>`. If the user named production sizes, pass
-`--assume ARG=N` so super-linear functions are projected to those sizes. Never
-point a workload at production credentials or live exchanges. The safety guard
-blocks the obvious cases, but ask the user whenever you are unsure.
+This step works in any language. If the user gave a workload after `--`, or the
+repo has an obvious test suite and the user agrees, run
+`trace "<repo>" [--otlp] [--heartbeat REGEX] -- <command>`:
+- Python 3.12+ is traced automatically.
+- Other languages send OpenTelemetry spans with `--otlp` when instrumented
+  (the Java agent, .NET automatic instrumentation, the Node `--require`
+  hook, or an SDK already in the code).
+- Any program that prints periodically gets stalls from `--heartbeat`.
+
+The `audit-trace` skill has the per-language setup. Do not add instrumentation
+to the repo without consent.
+
+If the user named production sizes, pass `--assume ARG=N` so super-linear
+functions are projected to those sizes. Never point a workload at production
+credentials or live exchanges. The safety guard blocks the obvious cases, but
+ask the user whenever you are unsure.
 
 ## 3. Rounds
 
@@ -67,8 +77,15 @@ Between rounds the queue does the following on its own:
   a proven effect gets traced up toward the entry points.
 - It suppresses findings whose chain uses a call edge an investigator rejected
   (`wrong_edge`).
-- It skips findings in languages with no reproduction harness yet (only Python
-  has one) and lists them with that reason.
+- It queues findings in every language. Each item's `harness` field tells the
+  investigator how to reproduce it:
+  - Python in-process;
+  - native probe or black-box: Rust, JavaScript, Java, C#, C, C++ (verified);
+  - native probe templates not yet verified on a toolchain, or black-box: Go,
+    TypeScript, Kotlin, Scala, Swift, Ruby, PHP.
+
+  Investigators report `inconclusive` when the language's toolchain is not
+  installed.
 
 ## 4. Report
 
@@ -84,8 +101,10 @@ Run `report "<repo>"`. This writes `.audit/report.html` (a self-contained page),
   - deadlines that cannot fire or are exceeded;
   - retry amplification.
 - **Rejected** findings with their reasons. These improve the static rules.
-- **Not investigated**, grouped by reason (budget, severity, no harness for
-  the language), so the user knows what is still open.
+- **Not investigated**, grouped by reason (budget, severity, trace
+  not-observed), and **inconclusive** findings grouped by what blocked them
+  (a missing toolchain, a hard-coded URL, real infrastructure), so the user
+  knows what is still open.
 
 Then offer to publish `.audit/report.html` as a shareable page, if an artifact
 tool is available. Read the file before publishing it.

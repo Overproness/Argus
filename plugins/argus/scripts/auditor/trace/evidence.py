@@ -4,6 +4,7 @@ Evidence status per finding:
   confirmed       the trace shows the predicted effect (a stall on the predicted stack, N+1 fan-out)
   not-observed    the code ran, the effect did not appear under this workload (evidence against)
   not-exercised   the function never ran; the workload does not cover it
+  not-traced      the run had no function-level view of this language (e.g. only client spans)
   measured        the trace gives a number the finding asked for (complexity, recursion depth)
   not-verifiable  tracing cannot decide this (timeouts, lock semantics); observed timings are attached
 """
@@ -46,6 +47,38 @@ class Evidence:
         self.stalls_by_leaf: dict[Key, list[StallRec]] = defaultdict(list)
         for s in trace.stalls:
             self.stalls_by_leaf[(s.file, s.line)].append(s)
+        # External calls (OpenTelemetry client spans), by the call they were made from.
+        self.io_by_parent: dict[tuple[int, int], list] = defaultdict(list)
+        for r in trace.io:
+            self.io_by_parent[(r.pid, r.parent)].append(r)
+        # Languages this run saw function by function. Elsewhere a function with no calls was not
+        # necessarily idle: the run just had no function-level view of it (spans cover external calls only).
+        lang_of = {(f["id"].rsplit(":", 2)[0], int(f["id"].rsplit(":", 2)[1])): f.get("lang")
+                   for f in map_data["functions"]}
+        self.function_level_langs = {lang_of.get(c.key) for c in trace.calls if c.file} - {None}
+        if any((r.get("source") or "python-tracer") == "python-tracer" for r in trace.runs):
+            self.function_level_langs.add("python")
+
+    def _owner_key(self, pid: int, call_id: int) -> Key | None:
+        """The repo function a call belongs to: itself if mapped, else its nearest mapped ancestor."""
+        cur, seen = self.by_id.get((pid, call_id)), set()
+        while cur is not None and (cur.pid, cur.id) not in seen:
+            seen.add((cur.pid, cur.id))
+            if cur.file:
+                return cur.key
+            cur = self.by_id.get((cur.pid, cur.parent))
+        return None
+
+    def _io_under(self, root: CallRec) -> list:
+        """External calls made by this activation, including through unmapped (library) spans below it."""
+        out, stack = list(self.io_by_parent.get((root.pid, root.id), [])), [root]
+        while stack:
+            c = stack.pop()
+            for ch in self.children[(c.pid, c.id)]:
+                if not ch.file:  # unmapped span: still part of this activation
+                    out += self.io_by_parent.get((ch.pid, ch.id), [])
+                    stack.append(ch)
+        return out
 
     # --- helpers ------------------------------------------------------------
     def _chain_keys(self, finding: dict) -> list[Key]:
@@ -96,6 +129,12 @@ class Evidence:
         st = self.stats(fkey) if fkey else None
         rule = f["rule"]
         if st is None:
+            lang = f.get("lang")
+            if lang and lang not in self.function_level_langs:
+                ext = f"; {len(self.trace.io)} external call(s) were observed (see External calls)" if self.trace.io else ""
+                return {"status": "not-traced", "stats": None,
+                        "detail": f"this run has no function-level data for {lang}: no spans for the repo's own "
+                                  f"functions{ext}. Add spans (method instrumentation, an SDK) or a native tracer"}
             return {"status": "not-exercised", "detail": "never ran under this workload", "stats": None}
         chain = self._chain_keys(f)
         leaf = chain[-1] if chain else fkey
@@ -115,9 +154,18 @@ class Evidence:
 
         if rule == "io-in-loop":
             if not chain or leaf == fkey:
+                per_io = [self._io_under(c) for c in self.calls_by_key[fkey]]
+                if any(per_io):
+                    mx = max(len(x) for x in per_io)
+                    targets = sorted({r.target for x in per_io for r in x})
+                    status = "confirmed" if mx > 1 else "not-observed"
+                    return {"status": status, "stats": st, "io": self._io_stats([r for x in per_io for r in x]),
+                            "detail": f"up to {mx} external call(s) per activation "
+                                      f"({len(per_io)} activation(s)) to {', '.join(targets[:3])}"
+                                      + ("; cost grows with the collection" if mx > 1 else "")}
                 return {"status": "not-verifiable", "stats": st,
-                        "detail": f"direct library call; tracing records repo functions only. "
-                                  f"{st['calls']} activation(s), max {_fmt(st['max_s'])}"}
+                        "detail": f"direct library call; this run recorded no client spans for it (use --otlp with "
+                                  f"an instrumented client). {st['calls']} activation(s), max {_fmt(st['max_s'])}"}
             per = [self._descendants_named(c, leaf) for c in self.calls_by_key[fkey]]
             mx = max(per)
             leaf_name = self.qualname_by_key.get(leaf, "?")
@@ -145,8 +193,21 @@ class Evidence:
 
         hits = [s for s in self.trace.stalls if fkey in {(a, b) for a, b, _ in s.stack}]
         extra = f"; {len(hits)} stall(s) passed through this function" if hits else ""
-        return {"status": "not-verifiable", "stats": st,
-                "detail": f"tracing cannot decide `{rule}`; ran {st['calls']}×, max {_fmt(st['max_s'])}{extra}"}
+        io = [r for c in self.calls_by_key[fkey] for r in self._io_under(c)]
+        out = {"status": "not-verifiable", "stats": st,
+               "detail": f"tracing cannot decide `{rule}`; ran {st['calls']}×, max {_fmt(st['max_s'])}{extra}"}
+        if io:
+            s = self._io_stats(io)
+            out["io"] = s
+            out["detail"] += (f"; observed {s['count']} external call(s), slowest {_fmt(s['max_s'])}"
+                              + (f", {s['errors']} failed" if s["errors"] else ""))
+        return out
+
+    @staticmethod
+    def _io_stats(rows) -> dict:
+        durs = sorted(r.dur for r in rows)
+        return {"count": len(rows), "errors": sum(r.error for r in rows), "p50_s": round(median(durs), 4),
+                "max_s": round(durs[-1], 4), "targets": sorted({r.target for r in rows})[:5]}
 
     # --- sizes flowing downstream ---------------------------------------------
     def size_links(self) -> dict[tuple[Key, str], set[tuple[Key, str]]]:
@@ -226,7 +287,8 @@ class Evidence:
                 continue
             worst = max(stalls, key=lambda s: s.dur)
             unmapped.append({
-                "function": self.qualname_by_key.get(leaf, worst.qualname), "location": f"{leaf[0]}:{leaf[1]}",
+                "function": self.qualname_by_key.get(leaf, worst.qualname),
+                "location": f"{leaf[0]}:{leaf[1]}" if leaf[0] else "",
                 "stalls": len(stalls), "worst_s": round(worst.dur, 4),
                 "stack": [q for _, _, q in worst.stack],
             })
@@ -234,14 +296,32 @@ class Evidence:
 
         fits = []
         for key, calls in self.calls_by_key.items():
+            if not key[0]:
+                continue
             fit = best_fit(calls)
             if fit and fit.exponent >= 1.3:
                 fits.append({"function": self.qualname_by_key.get(key, calls[0].qualname),
                              "location": f"{key[0]}:{key[1]}", **fit.__dict__})
         fits.sort(key=lambda x: -x["exponent"])
 
+        external = defaultdict(list)
+        for r in self.trace.io:
+            external[(r.system, r.target)].append(r)
+        ext_rows = []
+        for (system, target), rows in external.items():
+            durs = sorted(r.dur for r in rows)
+            callers = sorted({self.qualname_by_key.get(k, f"{k[0]}:{k[1]}")
+                              for r in rows if (k := self._owner_key(r.pid, r.parent))})
+            ext_rows.append({"system": system, "target": target, "count": len(rows),
+                             "errors": sum(r.error for r in rows), "p50_s": round(median(durs), 4),
+                             "p95_s": round(quantiles(durs, n=20)[-1] if len(durs) >= 2 else durs[-1], 4),
+                             "max_s": round(durs[-1], 4), "callers": callers[:5]})
+        ext_rows.sort(key=lambda x: -x["max_s"])
+
         slow = []
         for key, calls in self.calls_by_key.items():
+            if not key[0]:
+                continue  # spans that map to no repo function
             st = self.stats(key)
             slow.append({"function": self.qualname_by_key.get(key, calls[0].qualname),
                          "location": f"{key[0]}:{key[1]}", **st})
@@ -256,8 +336,9 @@ class Evidence:
                 "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "stall_threshold_s": self.threshold,
                 "runs": [{"pid": r.get("pid"), "lang": r.get("lang"), "argv": json.loads(r.get("argv", "[]")),
-                          "python": r.get("python")} for r in self.trace.runs],
-                "calls": len(self.trace.calls), "stalls": len(self.trace.stalls),
+                          "python": r.get("python"), "source": r.get("source", "python-tracer"),
+                          "service": r.get("service")} for r in self.trace.runs],
+                "calls": len(self.trace.calls), "stalls": len(self.trace.stalls), "io": len(self.trace.io),
                 "mapped_functions_exercised": sum(1 for k in self.qualname_by_key if k in self.calls_by_key),
                 "mapped_functions": len(self.qualname_by_key),
             },
@@ -266,6 +347,7 @@ class Evidence:
             "unpredicted_stalls": unmapped,
             "complexity": fits,
             "projections": self.projections(),
+            "external_calls": ext_rows[:50],
             "functions": slow[:50],
         }
 
@@ -273,9 +355,10 @@ class Evidence:
 def to_markdown(d: dict) -> str:
     m, out = d["meta"], ["# Runtime trace report\n"]
     cmds = "; ".join(" ".join(r["argv"]) for r in m["runs"][:3])
-    out.append(f"{len(m['runs'])} process(es) · {m['calls']} calls · {m['stalls']} stalls "
-               f"(threshold {_fmt(m['stall_threshold_s'])}) · {m['mapped_functions_exercised']}/"
-               f"{m['mapped_functions']} mapped functions exercised\n")
+    sources = sorted({r.get("source") or "python-tracer" for r in m["runs"]})
+    out.append(f"{len(m['runs'])} run(s) [{', '.join(sources)}] · {m['calls']} calls · {m.get('io', 0)} external "
+               f"calls · {m['stalls']} stalls (threshold {_fmt(m['stall_threshold_s'])}) · "
+               f"{m['mapped_functions_exercised']}/{m['mapped_functions']} mapped functions exercised\n")
     out.append(f"_Command: `{cmds}`_\n")
     out.append("_Evidence is only as good as the workload: **not-observed** means the effect did not appear "
                "in this run, **not-exercised** means the code never ran._\n")
@@ -292,9 +375,21 @@ def to_markdown(d: dict) -> str:
     if not d["unpredicted_stalls"]:
         out.append("None.\n")
     for u in d["unpredicted_stalls"]:
-        out.append(f"- `{u['function']}` at `{u['location']}`: {u['stalls']} stall(s), worst {_fmt(u['worst_s'])}; "
-                   f"stack {' → '.join(u['stack'])}")
+        where = f" at `{u['location']}`" if u["location"] else ""
+        stack = f"; stack {' → '.join(u['stack'])}" if u["stack"] else ""
+        out.append(f"- `{u['function']}`{where}: {u['stalls']} stall(s), worst {_fmt(u['worst_s'])}{stack}")
     out.append("")
+
+    out.append("## External calls observed\n")
+    if not d.get("external_calls"):
+        out.append("None recorded (client spans arrive with `--otlp` from an instrumented program).\n")
+    else:
+        out.append("| System | Target | Calls | Errors | p50 | p95 | Max | Called from |")
+        out.append("|---|---|---|---|---|---|---|---|")
+        for x in d["external_calls"]:
+            out.append(f"| {x['system']} | `{x['target'][:80]}` | {x['count']} | {x['errors']} | {_fmt(x['p50_s'])} | "
+                       f"{_fmt(x['p95_s'])} | {_fmt(x['max_s'])} | {', '.join(f'`{c}`' for c in x['callers'])} |")
+        out.append("")
 
     out.append("## Complexity fits (exponent ≥ 1.3)\n")
     if not d["complexity"]:

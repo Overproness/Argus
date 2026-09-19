@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SCHEMA = """
@@ -91,11 +91,25 @@ class StallRec:
     stack: list[tuple[str, int, str]]
 
 
+@dataclass(frozen=True)
+class IoRec:
+    """One observed external call (an OpenTelemetry client span): HTTP, DB, RPC or messaging."""
+    pid: int
+    id: int
+    parent: int  # the call (CallRec.id) it was made from
+    system: str  # http | db | rpc | messaging | other
+    target: str  # method + URL, statement, rpc method, destination
+    start: float
+    dur: float
+    error: bool
+
+
 @dataclass
 class Trace:
     runs: list[dict[str, str]]
     calls: list[CallRec]
     stalls: list[StallRec]
+    io: list[IoRec] = field(default_factory=list)
 
     def by_key(self) -> dict[tuple[str, int], list[CallRec]]:
         out: dict[tuple[str, int], list[CallRec]] = {}

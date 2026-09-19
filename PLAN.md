@@ -13,6 +13,12 @@ call inside an async trading loop took 30 s once and stalled everything.
 This workflow reverses that. **Fixed tools list every risky point in the code. The
 LLM only decides what to investigate. Every finding needs evidence.**
 
+**Scope: every programming language.** Argus is not built for one language or
+one kind of program. Every capability (the static map, effects, runtime
+evidence, reproduction, linter import) has to work for all supported languages.
+A capability that works in one language only is a gap, not a feature. See
+[Language parity](#language-parity).
+
 ## Status
 
 | Milestone | State |
@@ -20,9 +26,10 @@ LLM only decides what to investigate. Every finding needs evidence.**
 | M1: static map (Rust) | ✅ done |
 | M1.5: every major language + precise call resolution | ✅ done. 12 languages, SCIP import, checked against rattler (Rust, 457 files, 3 s) and sktime (Python, 1,111 files, 10 s) |
 | M2: runtime observation + fault injection | ✅ Python: tracer (`sys.monitoring`), SQLite store, stall detection, N+1 counts, complexity fitting, evidence report joined to the map, in-process fault injection, safety hook. Open: tracers for other languages, out-of-process fault injection, linter import |
-| M3: investigator agent + generated reproduction tests | ✅ Python. `investigator` subagent, `audit-investigate` skill, in-process reproduction harness (latency/hang injection, loop-lag monitor, deadlines, scaling fits, call counts), `repro` runner, PreToolUse safety guard, MCP server (`audit_map`, `audit_trace`, `run_repro`) |
+| M3: investigator agent + generated reproduction tests | ✅ Python in-process; every other language through M5 P1 (fault server plus black-box runs or native probes; Rust verified end to end with real investigator subagents). `investigator` subagent, `audit-investigate` skill, in-process reproduction harness (latency/hang injection, loop-lag monitor, deadlines, scaling fits, call counts), `repro` runner, PreToolUse safety guard, MCP server (`audit_map`, `audit_trace`, `run_repro`) |
 | M4: parallel investigators, passing effects in both directions, final report | ✅ Static effect engine for all 12 languages (waits, deadlines, retries, crash-on-error). Size projections from traces. Budgeted rounds with follow-ups and suppression. Verdict ledger checked against reproductions. `audit` skill, three new MCP tools, `report.html` |
-| M5: deeper verification (deterministic simulation, performance fuzzing, invariant mining) | planned |
+| M5: language parity: every capability in every language | in progress. ✅ P1 language-neutral reproduction (fault server, evidence protocol, native probes). ✅ P2a language-neutral runtime evidence (OpenTelemetry receiver and importer, span-to-function mapping, observed external calls, heartbeat stalls with attribution). Open: P2b native tracers, P3–P5; see [Language parity](#language-parity) |
+| M6: deeper verification (deterministic simulation, performance fuzzing, invariant mining) | planned |
 
 ## Form factor
 
@@ -37,7 +44,106 @@ LLM only decides what to investigate. Every finding needs evidence.**
 
 ---
 
-## Language support (M1.5)
+## Language parity
+
+**The rule:** prefer mechanisms that sit *outside* the program: the network, the
+process, stdout and standard file formats. One implementation then serves every
+language. Per-language adapters are added only for depth the neutral path cannot
+give (for example, function-level timings).
+
+| Capability | Language-neutral mechanism (one implementation) | Per-language depth |
+|---|---|---|
+| Static map and effects | tree-sitter plus one `LangSpec` per language | library rule packs |
+| Precise calls | SCIP (one reader for every indexer) | LSP call hierarchy where no indexer exists |
+| Fault injection | **fault server**: a local mock API or TCP proxy with latency, hang, reset and fail-first-N; counts every connection | Python in-process socket patches |
+| Reproduction | pytest wrappers drive any command; **`@@evidence` lines on stdout** from any language; **black-box** runs of the real program against the fault server | **native probes**: a small program in the target language, in a side project under `.audit/repros/native/` that depends on the repo by path, so the repo is never modified |
+| Runtime evidence | ✅ an OpenTelemetry receiver (OTLP/HTTP, protobuf and JSON, gzip) and file importer; spans mapped to map functions; client spans become observed external calls; ✅ heartbeat stalls (gaps between a program's own output lines), attributed to the deepest span covering the gap | function-level tracers: Python `sys.monitoring` ✅; Rust `tracing` layer, Node inspector, Go runtime/trace, JVM JFR, .NET EventPipe to do |
+| Linter evidence | SARIF import (one importer; most linters emit SARIF) | a table of linter commands |
+| Verification of Argus itself | a CI matrix that installs every toolchain | one fixture per language per capability |
+
+### Parity matrix
+
+✅ verified in this repo's tests · ◐ implemented, not yet verified (toolchain missing here) · ✗ missing
+
+| Language | Static map | Effects | Precise calls (SCIP) | Runtime evidence | Repro: black-box | Repro: native probe | Linter import |
+|---|---|---|---|---|---|---|---|
+| Python | ✅ | ✅ | ◐ | ✅ tracer + OTLP | ✅ | ✅ in-process | ✗ |
+| Rust | ✅ | ✅ | ✅ | ◐ OTLP (SDK) | ✅ | ✅ | ✗ |
+| JavaScript | ✅ | ✅ | ◐ | ✅ external calls via Node auto-instrumentation; own functions need spans | ✅ | ✅ | ✗ |
+| TypeScript | ✅ | ✅ | ◐ | ◐ same Node path as JavaScript | ✅ | ◐ (needs `tsx`) | ✗ |
+| Go | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
+| Java | ✅ | ✅ | ◐ | ✅ OTLP (Java agent) | ✅ | ✅ | ✗ |
+| Kotlin | ✅ | ✅ | ◐ | ◐ OTLP (Java agent) | ◐ | ◐ | ✗ |
+| Scala | ✅ | ✅ | ◐ | ◐ OTLP (Java agent) | ◐ | ◐ | ✗ |
+| C# | ✅ | ✅ | ◐ | ◐ OTLP (.NET) | ✅ | ✅ | ✗ |
+| Swift | ✅ | ✅ | ✗ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
+| C | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ✅ | ✅ | ✗ |
+| C++ | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ✅ | ✅ | ✗ |
+| Ruby | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
+| PHP | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
+
+"Runtime evidence" means OpenTelemetry spans through Argus's receiver. The
+protocol side is verified (real Python SDK exporter, official Java agent). A
+language stays ◐ until a real program in it has been traced in the tests.
+Heartbeat stalls work for any program that prints periodically, whatever its
+language (verified on Node and Python programs), so they get no column.
+
+The black-box path runs any command, so it works in every language as soon as
+the program can be pointed at the fault server (an environment variable, config
+file or argument for the dependency's URL). It is marked ✅ where a real
+program in that language has been run and observed through `run_target` in the
+tests. Rust, JavaScript, Java and C# programs were run against the fault server;
+C and C++ programs were run for scaling.
+
+### Getting to full parity (milestone M5)
+
+- **P1 ✅ Language-neutral reproduction**: the fault server, the `@@evidence`
+  protocol for any process, black-box runs, and native probes (scaffolds and run
+  commands) for Rust, JS, Java, C# and C/C++. Templates exist for Go, TS,
+  Kotlin, Scala, Swift, Ruby and PHP. The queue no longer skips findings by
+  language.
+- **P2 Runtime evidence for every language.**
+  - **P2a ✅ Neutral path**:
+    - `trace --otlp` runs an OTLP/HTTP receiver (protobuf and JSON, gzip) and
+      points the program's OpenTelemetry SDK or agent at it; `trace-import`
+      takes collector dumps.
+    - Spans map to map functions by code attributes, qualified names or
+      method-span names. Client spans become observed external calls (HTTP,
+      DB, RPC, messaging) with latency and errors, attributed to the calling
+      function. These external calls also confirm N+1 findings on direct
+      library calls, which the Python tracer alone could not see.
+    - `trace --heartbeat REGEX` turns gaps between a program's own output lines
+      into stalls, attributed to the deepest span covering each gap, or
+      recorded at program level when there are no spans.
+    - Verified with the real OpenTelemetry Python SDK exporter and, end to end,
+      with the official Java agent on an unmodified Java program (method spans
+      mapped, HttpURLConnection calls observed, `io-in-loop` confirmed). `trace --otlp`
+      derives the Java agent's method list (`OTEL_INSTRUMENTATION_METHODS_INCLUDE`)
+      from the map's JVM findings and entry points, so no setup is needed for
+      function-level spans on the JVM.
+      Also verified with Node's auto-instrumentation (--require), whose chunked uploads the receiver now decodes: external calls observed, and findings in files without function spans reported as 
+ot-traced rather than 
+ot-exercised. Heartbeats verified on a Node program.
+  - **P2b Native function-level tracers** for languages whose OpenTelemetry
+    setup needs code changes, or to go deeper than spans: Rust (`tracing`
+    layer), Node (inspector plus `monitorEventLoopDelay`), JVM (JFR), Go
+    (runtime/trace), .NET (EventPipe).
+- **P3 Linter evidence**: a SARIF importer plus a runner table (clippy via
+  clippy-sarif, ruff, golangci-lint, eslint, detekt, Roslyn analyzers, semgrep,
+  PMD/SpotBugs, RuboCop, PHPStan, SwiftLint). Imported results confirm or
+  contradict map findings.
+- **P4 Precise calls everywhere**: verify each SCIP indexer on a fixture; add an
+  LSP call-hierarchy fallback (sourcekit-lsp for Swift).
+- **P5 CI matrix**: GitHub Actions installing all toolchains and running every
+  per-language fixture for every capability. This turns ◐ into ✅ and keeps it
+  there.
+- **Evaluation corpus**: per language, real repositories with known bugs as
+  ground truth. Recall and false-positive rate per language and per capability.
+  Any user repo, such as a trading bot, joins as one more ground-truth case.
+
+---
+
+## Language support: static map (M1.5)
 
 Parsing uses `tree-sitter-language-pack`. Each language is one `LangSpec`: node
 types, async rules, library rules and hooks.
@@ -164,10 +270,13 @@ fits log-log and change-point models (`big_O`-style).
 | Trading-specific | exchange testnets and paper accounts (Binance testnet, Coinbase sandbox, Alpaca paper, IBKR paper); market-data tick replay; event-driven backtesters with latency models (**nautilus_trader**, **hftbacktest**, Lean, backtrader) |
 | Load and stress | k6, Locust, Gatling, wrk2, vegeta, oha, goose, Artillery, JMeter |
 
-For your trading bug, the M2/M5 path is:
-1. Wrap the exchange client behind Toxiproxy, or use turmoil/madsim in tests.
+The same recipe works in any language. For example, for the motivating bug (a
+sync exchange call in an async trading loop):
+1. Point the exchange client at Argus's fault server (or Toxiproxy, or a
+   deterministic simulator such as turmoil/madsim for Rust or Coyote for .NET).
 2. Inject 30 s of latency on one call.
-3. Assert that the strategy loop still ticks within its deadline.
+3. Assert, from the program's heartbeat lines or a native probe, that the loop
+   still ticks within its deadline.
 
 That test fails on the sync call, which proves the finding.
 
@@ -325,11 +434,38 @@ what the agents decide.
     through the same queue and ledger. MCP gained `audit_queue`,
     `audit_record` and `audit_report`. The harness gained `fail_connect()` and
     `count_connects()` for retry reproductions.
-- **M5: deep verification.**
-  - Deterministic simulation (turmoil/madsim) for Rust services.
-  - Performance fuzzing on hot functions.
-  - Daikon-style invariant mining.
-  - Kani/CrossHair on critical maths.
+- **M5: language parity.** See [Getting to full parity](#getting-to-full-parity-milestone-m5).
+  - P1 ✅ Language-neutral reproduction (`repro/faults.py`, `repro/native.py`,
+    `fault-server` and `probe` CLI commands):
+    - `FaultServer`: a mock HTTP API or TCP proxy with `latency`, `hang`,
+      `reset` and `fail_first`. It records each connection's time and peer, and
+      the gaps between connections.
+    - `run_target()`: runs any command and observes it from outside: exit code,
+      wall time, whether it returned before the deadline, stdout lines with
+      arrival times, `@@evidence` lines, and heartbeat gaps. It kills the whole
+      process tree on timeout.
+    - Native probe scaffolds: a side project per language that depends on the
+      repo by path, plus a small evidence helper in that language.
+  - P2a ✅ Language-neutral runtime evidence (`trace/otlp.py`, `trace/spans.py`,
+    `trace --otlp`, `trace --heartbeat`, `trace-import`):
+    - an OTLP/HTTP receiver and decoders, sharing a hand-written protobuf
+      reader with the SCIP import (`protowire.py`);
+    - a `Mapper` from spans to map functions;
+    - `IoRec` external calls in the trace store, and an "External calls
+      observed" section in `trace.md`;
+    - heartbeat logs with stall attribution.
+
+    `evidence.py` needed no change for stalls: attributed heartbeat stalls use
+    the same stack format as the Python tracer's.
+  - P2b native tracers, P3 SARIF linter import, P4 SCIP/LSP everywhere, P5 CI
+    matrix, evaluation corpus: open.
+- **M6: deep verification**, in every language:
+  - deterministic simulation (turmoil/madsim for Rust, Coyote for .NET,
+    Lincheck for the JVM, simulated clocks elsewhere);
+  - performance fuzzing on hot functions (PerfFuzz-style, per language via its
+    fuzzer: cargo-fuzz, Atheris, Jazzer, Go fuzzing, SharpFuzz);
+  - Daikon-style invariant mining;
+  - proofs and symbolic checks on critical maths (Kani, CrossHair, JBMC, KLEE).
 - **Backlog of static rules:**
   - ✅ retry without backoff, unbounded retries, retry amplification (M4);
   - ✅ `unwrap`/`expect` on network and DB results (M4). Open: panics on parsed
@@ -345,9 +481,10 @@ what the agents decide.
   - `SystemTime` used for intervals;
   - regexes with catastrophic backtracking;
   - loading all rows without pagination.
-- **Evaluation:** run on the real Rust trading repo. Known bugs such as the sync
-  API call are the ground truth; measure recall and false-positive rate on each
-  milestone.
+- **Evaluation:** a corpus of real repositories per language with known bugs as
+  ground truth. Measure recall and false-positive rate per language and per
+  capability on each milestone. Any user repo (a trading bot with the sync API
+  call, say) is one more ground-truth case, not the target.
 
 ## Risks
 
@@ -357,6 +494,10 @@ what the agents decide.
 - **Cost of one agent per function:** avoid it. Rank hotspots and cap the budget.
 - **Realistic inputs for microservices:** record/replay, mocks and deterministic
   simulation are where most of the effort goes.
-- **Unverified SCIP indexers:** only rust-analyzer is tested so far. Verify the
-  others as their toolchains become available (Go isn't installed on this
-  machine).
+- **Unverified languages:** several toolchains (Go, Ruby, PHP, Swift, Kotlin,
+  Scala) are not installed on the development machine, so their SCIP indexers,
+  native probes and black-box runs are implemented but unverified. The CI matrix
+  (P5) is the fix; until then the parity matrix says ◐, not ✅.
+- **One-language drift:** new features tend to land in the language at hand
+  first. Every new capability needs a language-neutral path, or an entry in the
+  parity matrix saying which languages lack it.

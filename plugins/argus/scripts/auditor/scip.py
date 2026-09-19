@@ -16,6 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import protowire
 from .model import Function
 
 DEFINITION_ROLE = 0x1
@@ -60,43 +61,7 @@ INDEXERS = {
 
 # --- protobuf wire format ------------------------------------------------------
 
-def _varint(b: memoryview, i: int) -> tuple[int, int]:
-    shift = result = 0
-    while True:
-        x = b[i]
-        i += 1
-        result |= (x & 0x7F) << shift
-        if not x & 0x80:
-            return result, i
-        shift += 7
-
-
-def _fields(b: memoryview):
-    i, n = 0, len(b)
-    while i < n:
-        key, i = _varint(b, i)
-        fno, wt = key >> 3, key & 7
-        if wt == 0:
-            v, i = _varint(b, i)
-        elif wt == 2:
-            ln, i = _varint(b, i)
-            v = b[i:i + ln]
-            i += ln
-        elif wt == 5:
-            v, i = b[i:i + 4], i + 4
-        elif wt == 1:
-            v, i = b[i:i + 8], i + 8
-        else:
-            raise ValueError(f"unsupported wire type {wt}")
-        yield fno, wt, v
-
-
-def _packed(v: memoryview) -> list[int]:
-    out, i = [], 0
-    while i < len(v):
-        x, i = _varint(v, i)
-        out.append(x)
-    return out
+_varint, _fields, _packed = protowire.varint, protowire.fields, protowire.packed
 
 
 def read_occurrences(path: Path):
