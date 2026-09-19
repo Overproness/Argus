@@ -75,6 +75,7 @@ python plugins/argus/scripts/auditor_cli.py trace path/to/repo --otlp --heartbea
 #   any language: OpenTelemetry spans + stalls from gaps between "tick" lines
 python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --otlp-file collector-dump.json
 python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --profile py-spy.speedscope.json
+python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --chrome trace-1234.json   # Rust tracing-chrome
 python plugins/argus/scripts/auditor_cli.py trace-report path/to/repo --assume rows=50000  # rebuild, project sizes
 #   runs accumulate in .audit/trace/; delete it to start over
 python plugins/argus/scripts/auditor_cli.py repro path/to/repo   # run .audit/repros/test_*.py -> .audit/repro.{json,md}

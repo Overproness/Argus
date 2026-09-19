@@ -90,13 +90,14 @@ def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bo
 
 @server.tool()
 def audit_trace_import(repo: str, otlp_files: list[str] | None = None, profiles: list[str] | None = None,
-                       coverage: list[str] | None = None, stall_ms: float = 100, out: str | None = None,
-                       assume: dict[str, float] | None = None) -> dict:
+                       coverage: list[str] | None = None, chrome_traces: list[str] | None = None,
+                       stall_ms: float = 100, out: str | None = None, assume: dict[str, float] | None = None) -> dict:
     """Import runtime data recorded elsewhere, then rebuild .audit/trace.{json,md} like audit_trace.
 
     otlp_files: collector file-exporter output, OTLP JSON or protobuf. profiles: a V8 .cpuprofile (Node, Deno,
     Chrome DevTools) or speedscope JSON (py-spy, rbspy, dotnet-trace, ...). coverage: V8 coverage JSON files
-    or directories (NODE_V8_COVERAGE) for exact call counts.
+    or directories (NODE_V8_COVERAGE) for exact call counts. chrome_traces: Chrome trace-event JSON, e.g.
+    Rust tracing-chrome output (one slice per poll of an instrumented span).
     """
     from auditor.trace import sources
 
@@ -105,7 +106,7 @@ def audit_trace_import(repo: str, otlp_files: list[str] | None = None, profiles:
     if not (out_dir / "map.json").exists():
         return {"error": f"{out_dir / 'map.json'} missing; call audit_map first"}
     try:
-        got = sources.import_files(out_dir / "trace", otlp_files or [], profiles or [], coverage or [])
+        got = sources.import_files(out_dir / "trace", otlp_files or [], profiles or [], coverage or [], chrome_traces or [])
     except (ValueError, OSError) as e:
         return {"error": str(e)}
     return _evidence(root, out_dir, stall_ms, assume, {"imported": got})

@@ -11,7 +11,7 @@ import shutil
 import time
 from pathlib import Path
 
-from . import otlp, profiles, spans, store
+from . import chrome, otlp, profiles, spans, store
 from .store import Trace
 
 
@@ -19,7 +19,8 @@ def collect(trace_dir: Path, map_data: dict, repo: Path, stall_s: float) -> Trac
     """Python tracer databases, OTLP spans and heartbeats, then profiles and coverage. The order matters: a
     profile stall replaces a heartbeat gap it explains."""
     t = spans.attach(store.load(trace_dir), trace_dir, map_data, repo)
-    return profiles.attach(t, trace_dir, map_data, repo, stall_s)
+    t = profiles.attach(t, trace_dir, map_data, repo, stall_s)
+    return chrome.attach(t, trace_dir, map_data, repo, stall_s)
 
 
 def profile_kind(path: Path) -> str:
@@ -36,7 +37,7 @@ def profile_kind(path: Path) -> str:
                      "(py-spy/rbspy --format speedscope, dotnet-trace convert --format Speedscope)")
 
 
-def import_files(trace_dir: Path, otlp_files=(), profile_files=(), coverage=()) -> dict[str, int]:
+def import_files(trace_dir: Path, otlp_files=(), profile_files=(), coverage=(), chrome_files=()) -> dict[str, int]:
     stamp = f"{time.time_ns() // 1_000_000}"
     trace_dir.mkdir(parents=True, exist_ok=True)
     kinds = [(Path(f), profile_kind(Path(f))) for f in profile_files]  # check them all before copying any
@@ -48,10 +49,13 @@ def import_files(trace_dir: Path, otlp_files=(), profile_files=(), coverage=()) 
     for i, (f, kind) in enumerate(kinds):
         (trace_dir / "profiles").mkdir(exist_ok=True)
         shutil.copy(f, trace_dir / "profiles" / f"import-{stamp}-{i}.{kind}{'' if kind == 'cpuprofile' else '.json'}")
+    for i, f in enumerate(map(Path, chrome_files)):
+        (trace_dir / "chrome").mkdir(exist_ok=True)
+        shutil.copy(f, trace_dir / "chrome" / f"import-{stamp}-{i}.json")
     n_cov = 0
     for i, f in enumerate(map(Path, coverage)):
         (trace_dir / "coverage").mkdir(exist_ok=True)
         for j, src in enumerate(sorted(f.glob("*.json")) if f.is_dir() else [f]):
             shutil.copy(src, trace_dir / "coverage" / f"import-{stamp}-{i}-{j}.json")
             n_cov += 1
-    return {"spans": n_spans, "profiles": len(kinds), "coverage_files": n_cov}
+    return {"spans": n_spans, "profiles": len(kinds), "coverage_files": n_cov, "chrome": len(chrome_files)}

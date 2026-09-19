@@ -5,7 +5,7 @@
   auditor_cli.py index <repo> [--out DIR] [--only rust-analyzer,scip-python,...]
   auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] [--assume ARG=N]
                               [--otlp] [--heartbeat REGEX] [--node | --no-node] -- <command...>
-  auditor_cli.py trace-import <repo> [--otlp-file spans.json] [--profile x.cpuprofile|x.speedscope.json]
+  auditor_cli.py trace-import <repo> [--otlp-file spans.json] [--profile x.cpuprofile|x.speedscope.json] [--chrome trace.json]
                                      [--coverage v8-coverage-dir] [--stall-ms 100] [--assume ARG=N]
   auditor_cli.py trace-report <repo> [--out DIR] [--stall-ms 100] [--assume ARG=N]
   auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600]
@@ -64,6 +64,8 @@ def main() -> int:
                     help="collector file-exporter output, an OTLP JSON document, or raw OTLP protobuf (repeatable)")
     ti.add_argument("--profile", type=Path, action="append", default=[],
                     help="a V8 .cpuprofile or a speedscope JSON (py-spy, rbspy, dotnet-trace, ...) (repeatable)")
+    ti.add_argument("--chrome", type=Path, action="append", default=[],
+                    help="Chrome trace-event JSON, e.g. Rust tracing-chrome output (repeatable)")
     ti.add_argument("--coverage", type=Path, action="append", default=[],
                     help="V8 coverage JSON (a NODE_V8_COVERAGE file or directory) for exact call counts (repeatable)")
     ti.add_argument("--stall-ms", type=float, default=100, help=stall_help + " (profiles are read with it)")
@@ -165,16 +167,16 @@ def main() -> int:
                                otlp=args.otlp, heartbeat=args.heartbeat, node=node)
             print(f"command exited {rc}")
         if args.cmd == "trace-import":
-            if not (args.otlp_file or args.profile or args.coverage):
-                print("trace-import: pass --otlp-file, --profile and/or --coverage", file=sys.stderr)
+            if not (args.otlp_file or args.profile or args.coverage or args.chrome):
+                print("trace-import: pass --otlp-file, --profile, --chrome and/or --coverage", file=sys.stderr)
                 return 1
             try:
-                got = sources.import_files(trace_dir, args.otlp_file, args.profile, args.coverage)
+                got = sources.import_files(trace_dir, args.otlp_file, args.profile, args.coverage, args.chrome)
             except ValueError as e:
                 print(f"trace-import: {e}", file=sys.stderr)
                 return 1
             print(f"imported {got['spans']} span(s), {got['profiles']} profile(s), "
-                  f"{got['coverage_files']} coverage file(s)")
+                  f"{got['coverage_files']} coverage file(s), {got['chrome']} chrome trace(s)")
         map_data = json.loads(map_path.read_text(encoding="utf8"))
         t = sources.collect(trace_dir, map_data, repo, args.stall_ms / 1000)
         if not (t.calls or t.stalls or t.io or t.counts):

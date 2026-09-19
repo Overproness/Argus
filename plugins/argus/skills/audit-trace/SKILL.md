@@ -60,6 +60,21 @@ explicit consent. If the repo has no OpenTelemetry and the language needs code
 for it, use `--heartbeat` alone: program-level stalls are still evidence. Say
 that function-level attribution needs spans.
 
+### Rust: import a `tracing-chrome` trace
+
+Add to the program, keeping the guard alive until exit, and put `#[tracing::instrument]` on the suspect fns
+(async fns included, since each poll becomes one slice):
+
+```rust
+let (chrome, _guard) = tracing_chrome::ChromeLayerBuilder::new().include_args(true).build();
+tracing_subscriber::registry().with(chrome).init();
+```
+
+Run the workload, then `trace-import <repo> --chrome trace-*.json` (MCP: `audit_trace_import` with
+`chrome_traces`). A poll with long self time while an async fn is on its stack is a stall, so a sync call
+blocking the runtime is confirmed with its stack. Only instrumented functions are seen. N+1 counts for async
+callees count polls and can overstate: check them against the code.
+
 ## 2. Pick a workload
 
 Evidence is only as good as the code the workload exercises. In order of preference:
