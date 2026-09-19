@@ -68,7 +68,7 @@ def run(repo: Path, out_dir: Path, target: Path | None = None, timeout: int = 60
     repro_dir.mkdir(parents=True, exist_ok=True)
     files = [target] if target else sorted(repro_dir.glob("test_*.py"))
     result = {
-        "meta": {"tool": "repo-auditor/repro", "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "meta": {"tool": "argus/repro", "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                  "files": [str(f) for f in files]},
         "tests": [], "exit_code": 0, "output_tail": "",
     }

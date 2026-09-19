@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""repo-auditor CLI.
+"""argus CLI.
 
   auditor_cli.py map   <repo> [--out DIR] [--include-tests] [--no-scip]
   auditor_cli.py index <repo> [--out DIR] [--only rust-analyzer,scip-python,...]
-  auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] -- <command...>
-  auditor_cli.py trace-report <repo> [--out DIR]
+  auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] [--assume ARG=N] -- <command...>
+  auditor_cli.py trace-report <repo> [--out DIR] [--assume ARG=N]
   auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600]
+  auditor_cli.py queue <repo> [--budget 10] [--per-round 5] [--max-rounds 3] [--rule R] [--dry-run]
+  auditor_cli.py record <repo> (--file verdicts.json | -)
+  auditor_cli.py report <repo> [--out DIR]
   auditor_cli.py langs
 """
 from __future__ import annotations
@@ -36,15 +39,36 @@ def main() -> int:
     tp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
     tp.add_argument("--stall-ms", type=float, default=100, help="self-slice length that counts as a stall")
     tp.add_argument("--no-shapes", action="store_true", help="do not record argument sizes")
+    assume_help = "project cost at this input size: ARG=N, FUNCTION=N, FUNCTION.ARG=N or *=N (repeatable)"
+    tp.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
     tp.add_argument("command", nargs=argparse.REMAINDER, help="command to run, after --")
     rp = sub.add_parser("trace-report", help="rebuild trace.json/trace.md from recorded traces")
     rp.add_argument("repo", type=Path)
     rp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    rp.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
     pp = sub.add_parser("repro", help="run reproduction tests under <out>/repros and collect evidence")
     pp.add_argument("repo", type=Path)
     pp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
     pp.add_argument("--file", type=Path, help="run one reproduction file instead of all")
     pp.add_argument("--timeout", type=int, default=600, help="seconds before the whole run is killed")
+    qp = sub.add_parser("queue", help="next round of findings to investigate, ranked and within budget")
+    qp.add_argument("repo", type=Path)
+    qp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    qp.add_argument("--budget", type=int, help="total investigations across all rounds (default 10, remembered)")
+    qp.add_argument("--per-round", type=int, help="investigations per round (default 5, remembered)")
+    qp.add_argument("--max-rounds", type=int, help="round cap (default 3, remembered)")
+    qp.add_argument("--rule", action="append", default=[], help="only these rules (repeatable)")
+    qp.add_argument("--include-low", action="store_true", help="also queue low-severity findings")
+    qp.add_argument("--include-info", action="store_true", help="also queue info findings")
+    qp.add_argument("--retry-inconclusive", action="store_true", help="requeue inconclusive verdicts")
+    qp.add_argument("--dry-run", action="store_true", help="show the round without opening it")
+    vp = sub.add_parser("record", help="record investigator verdicts in .audit/verdicts.json")
+    vp.add_argument("repo", type=Path)
+    vp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    vp.add_argument("--file", type=Path, help="JSON file with one verdict object or a list; '-' reads stdin")
+    fp = sub.add_parser("report", help="final report from map, trace, repro and verdicts: report.{json,md,html}")
+    fp.add_argument("repo", type=Path)
+    fp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
     sub.add_parser("langs", help="list supported languages and their SCIP indexers")
     args = ap.parse_args()
 
@@ -89,10 +113,64 @@ def main() -> int:
             print(f"no {map_path}; run `map` first to link evidence to findings", file=sys.stderr)
             return 1
         from auditor.trace import evidence
-        jp, mp_ = evidence.write(map_path, t, out_dir)
+        try:
+            scale = {k.strip(): float(v) for k, v in (a.split("=", 1) for a in args.assume)}
+        except ValueError:
+            print("--assume takes NAME=N, e.g. --assume rows=50000", file=sys.stderr)
+            return 1
+        jp, mp_ = evidence.write(map_path, t, out_dir, scale)
         data = json.loads(jp.read_text(encoding="utf8"))
         print("evidence: " + ", ".join(f"{v} {k}" for k, v in sorted(data["summary"].items())))
         print(f"wrote {jp}\nwrote {mp_}")
+        return 0
+
+    if args.cmd in ("queue", "record", "report"):
+        from auditor import orchestrate
+        if not (out_dir / "map.json").exists():
+            print(f"no {out_dir / 'map.json'}; run `map` first", file=sys.stderr)
+            return 1
+        if args.cmd == "queue":
+            res = orchestrate.queue(
+                out_dir, {"total": args.budget, "per_round": args.per_round, "max_rounds": args.max_rounds},
+                set(args.rule) or None, args.include_low, args.include_info, args.retry_inconclusive, args.dry_run)
+            b = res["budget"]
+            if res["stop"]:
+                print(f"stop: {res['stop']} (budget {b['issued']}/{b['total']} used)")
+            else:
+                print(f"round {res['round']}: {len(res['items'])} item(s), {len(res['deferred'])} deferred, "
+                      f"{len(res['skipped'])} skipped, budget {b['issued'] + len(res['items'])}/{b['total']}")
+                for it in res["items"]:
+                    extra = f" (+{len(it['covers'])} merged)" if it.get("covers") else ""
+                    print(f"  {it['score']:>5}  {it['id']}{extra}")
+            if res["pending"]:
+                print(f"warning: {len(res['pending'])} item(s) from earlier rounds have no verdict: "
+                      + ", ".join(res["pending"][:5]), file=sys.stderr)
+            if not args.dry_run:
+                print(f"wrote {out_dir / 'queue.json'}")
+            return 0
+        if args.cmd == "record":
+            if args.file is None:
+                print("record: pass --file verdicts.json (or --file - for stdin)", file=sys.stderr)
+                return 1
+            raw = sys.stdin.read() if str(args.file) == "-" else args.file.read_text(encoding="utf8")
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as e:
+                print(f"record: not JSON: {e}", file=sys.stderr)
+                return 1
+            res = orchestrate.record(out_dir, data if isinstance(data, list) else [data])
+            print(f"recorded {len(res['recorded'])}, downgraded {len(res['downgraded'])}, "
+                  f"refused {len(res['rejected_input'])}")
+            for fid in res["downgraded"]:
+                print(f"  downgraded to inconclusive (repro did not pass): {fid}")
+            for r in res["rejected_input"]:
+                print(f"  refused: {r['reason']}", file=sys.stderr)
+            return 0 if not res["rejected_input"] else 1
+        from auditor import report_html
+        data = orchestrate.final(out_dir)
+        paths = report_html.write(data, out_dir)
+        print(", ".join(f"{v} {k}" for k, v in sorted(data["summary"]["by_status"].items())))
+        print("\n".join(f"wrote {p}" for p in paths))
         return 0
 
     if args.cmd == "repro":

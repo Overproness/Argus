@@ -26,9 +26,10 @@ def _fmt(s: float) -> str:
 
 
 class Evidence:
-    def __init__(self, map_data: dict, trace: Trace):
+    def __init__(self, map_data: dict, trace: Trace, scale: dict[str, float] | None = None):
         self.map = map_data
         self.trace = trace
+        self.scale = scale or {}
         self.threshold = max((float(r.get("stall_threshold", 0.1)) for r in trace.runs), default=0.1)
         self.key_by_qualname: dict[str, Key] = {}
         self.qualname_by_key: dict[Key, str] = {}
@@ -147,6 +148,67 @@ class Evidence:
         return {"status": "not-verifiable", "stats": st,
                 "detail": f"tracing cannot decide `{rule}`; ran {st['calls']}×, max {_fmt(st['max_s'])}{extra}"}
 
+    # --- sizes flowing downstream ---------------------------------------------
+    def size_links(self) -> dict[tuple[Key, str], set[tuple[Key, str]]]:
+        """(callee, arg) -> {(caller, arg)} where the caller passed the same size down in one activation."""
+        links: dict[tuple[Key, str], set[tuple[Key, str]]] = defaultdict(set)
+        for c in self.trace.calls:
+            if not c.shapes:
+                continue
+            p = self.by_id.get((c.pid, c.parent))
+            if p is None or not p.shapes:
+                continue
+            for a, n in c.shapes.items():
+                if n < 2:
+                    continue
+                for pa, pn in p.shapes.items():
+                    if pn == n:
+                        links[(c.key, a)].add((p.key, pa))
+        return links
+
+    def upstream_max(self, key: Key, arg: str, links, seen=None) -> tuple[float, str]:
+        """Largest size of `arg` seen here or at any argument that feeds it from upstream."""
+        seen = seen if seen is not None else set()
+        if (key, arg) in seen:
+            return 0.0, ""
+        seen.add((key, arg))
+        name = self.qualname_by_key.get(key, f"{key[0]}:{key[1]}")
+        best = (max((c.shapes.get(arg, 0.0) for c in self.calls_by_key.get(key, [])), default=0.0), f"{name}({arg})")
+        for src_key, src_arg in links.get((key, arg), ()):
+            n, where = self.upstream_max(src_key, src_arg, links, seen)
+            if n > best[0]:
+                best = (n, where)
+        return best
+
+    def projections(self) -> list[dict]:
+        """Cost of each super-linear function at the largest input that can reach it."""
+        links = self.size_links()
+        out = []
+        for key, calls in self.calls_by_key.items():
+            fit = best_fit(calls)
+            if not fit or fit.exponent < 1.3 or fit.r2 < 0.8:
+                continue
+            name = self.qualname_by_key.get(key, calls[0].qualname)
+            cands: list[tuple[float, str]] = []
+            n_up, where = self.upstream_max(key, fit.arg, links)
+            if n_up > fit.n_max:
+                cands.append((n_up, f"largest {fit.arg} seen upstream, at {where}"))
+            for hint, n in self.scale.items():
+                if hint in (fit.arg, name, f"{name}.{fit.arg}", "*"):
+                    cands.append((n, f"--assume {hint}={n:g}"))
+            if not cands:
+                continue
+            observed = max(c.dur for c in calls)
+            rows = [{"n": n, "source": src, "predicted_s": round(fit.predict(n), 4)} for n, src in cands]
+            out.append({
+                "function": name, "location": f"{key[0]}:{key[1]}", "arg": fit.arg, "exponent": fit.exponent,
+                "r2": fit.r2, "observed_n_max": fit.n_max, "observed_max_s": round(observed, 4),
+                "projections": rows,
+                "risk": any(r["predicted_s"] >= max(1.0, 10 * observed) for r in rows),
+            })
+        out.sort(key=lambda p: -max(r["predicted_s"] for r in p["projections"]))
+        return out
+
     # --- report -------------------------------------------------------------
     def build(self) -> dict:
         findings = []
@@ -190,7 +252,7 @@ class Evidence:
             status[f["evidence"]["status"]] += 1
         return {
             "meta": {
-                "tool": "repo-auditor/trace", "version": 1,
+                "tool": "argus/trace", "version": 1,
                 "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "stall_threshold_s": self.threshold,
                 "runs": [{"pid": r.get("pid"), "lang": r.get("lang"), "argv": json.loads(r.get("argv", "[]")),
@@ -203,6 +265,7 @@ class Evidence:
             "findings": findings,
             "unpredicted_stalls": unmapped,
             "complexity": fits,
+            "projections": self.projections(),
             "functions": slow[:50],
         }
 
@@ -244,6 +307,23 @@ def to_markdown(d: dict) -> str:
                        f"{c['arg']}={c['n_min']:g}…{c['n_max']:g} |")
         out.append("")
 
+    out.append("## Scaling projections\n")
+    if not d.get("projections"):
+        out.append("None: no super-linear function has a larger input reaching it (pass `--assume arg=N` "
+                   "to project a size you expect in production).\n")
+    else:
+        out.append("_A fitted curve extrapolated to inputs larger than the run exercised. Treat it as an "
+                   "order of magnitude, not a measurement._\n")
+        out.append("| Function | Location | Fit | Observed | Projected | Source | Risk |")
+        out.append("|---|---|---|---|---|---|---|")
+        for p in d["projections"]:
+            for r in p["projections"]:
+                out.append(f"| `{p['function']}` | {p['location']} | {p['arg']}^{p['exponent']} (R²={p['r2']}) | "
+                           f"{p['arg']}≤{p['observed_n_max']:g}: {_fmt(p['observed_max_s'])} | "
+                           f"{p['arg']}={r['n']:g}: **{_fmt(r['predicted_s'])}** | {r['source']} | "
+                           f"{'yes' if p['risk'] else 'no'} |")
+        out.append("")
+
     out.append("## Slowest functions by self time\n")
     out.append("| Function | Location | Calls | Self | Total | p95 | Max slice | Stalls |")
     out.append("|---|---|---|---|---|---|---|---|")
@@ -254,8 +334,9 @@ def to_markdown(d: dict) -> str:
     return "\n".join(out)
 
 
-def write(map_path: Path, trace: Trace, out_dir: Path) -> tuple[Path, Path]:
-    data = Evidence(json.loads(map_path.read_text(encoding="utf8")), trace).build()
+def write(map_path: Path, trace: Trace, out_dir: Path, scale: dict[str, float] | None = None) -> tuple[Path, Path]:
+    data = Evidence(json.loads(map_path.read_text(encoding="utf8")), trace, scale).build()
+    data["meta"]["assume"] = scale or {}
     jp, mp = out_dir / "trace.json", out_dir / "trace.md"
     jp.write_text(json.dumps(data, indent=2), encoding="utf8")
     mp.write_text(to_markdown(data), encoding="utf8")

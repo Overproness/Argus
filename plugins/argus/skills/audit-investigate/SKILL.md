@@ -1,58 +1,70 @@
 ---
 name: audit-investigate
-description: Verify audit findings by reproduction. Runs one investigator subagent per finding from .audit/map.json (and .audit/trace.json evidence when present); each writes and runs a test that triggers the predicted effect under controlled conditions (latency injection, dead peer, scaling inputs) and reports a verdict with numbers. Use after audit-map or audit-trace when the user wants findings proven, asks "is this real", or wants reproduction tests for the risks found.
+description: Verify audit findings by reproduction, one round. The deterministic queue ranks findings from .audit/map.json (and .audit/trace.json evidence when present); one investigator subagent per queued finding writes and runs a test that triggers the predicted effect under controlled conditions (latency injection, dead peer, simulated outage, scaling inputs) and reports a verdict with numbers, which is recorded in the verdict ledger. Use after audit-map or audit-trace when the user wants findings proven, asks "is this real", or wants reproduction tests. For several rounds and a final report, use the `audit` skill.
 argument-hint: "[repo path] [--max N] [--rule blocking-in-async,...]"
 ---
 
-# Audit investigate
+# Audit investigate (one round)
 
-A finding becomes real when a test that triggers it runs. This skill fans out
-one investigator per finding and collects the verdicts.
+A finding becomes real when a test that triggers it runs. This skill runs one
+round: the queue picks, investigators reproduce, and the ledger records.
 
-## 1. Select findings
+The CLI is `python "<plugin-root>/scripts/auditor_cli.py"`. The plugin root is
+two directories above this skill's base directory, or `${CLAUDE_PLUGIN_ROOT}`.
 
-Read `.audit/map.json` (run `audit-map` if missing). If `.audit/trace.json`
-exists, read it too. Select, in this order, up to `--max` (default 5):
+## 1. Queue
 
-1. `high` and `medium` findings whose trace evidence is `confirmed` or absent;
-2. `needs-evidence` findings from the audit-map triage;
-3. anything the user named with `--rule` or by function.
+Run `map` first if `.audit/map.json` is missing. Then:
 
-Skip findings the trace marked `not-observed` unless the user asks; say so.
-Skip `info` findings unless the user asks.
+```bash
+python "<plugin-root>/scripts/auditor_cli.py" queue "<repo>" --per-round N [--rule R ...]
+```
 
-Python only for now. For other languages, tell the user which findings would
-need a harness that does not exist yet.
+`N` is `--max` (default 5). Pass `--rule` for each rule the user named. The
+queue:
+- ranks findings by severity, confidence, trace evidence and hotspot score;
+- merges findings that share a leaf;
+- skips findings with verdicts, `info`/`low` severity, and `not-observed`
+  evidence;
+- skips languages without a harness (only Python has one).
+
+Read `.audit/queue.json`. Tell the user what was skipped and why, especially
+non-Python findings, which need a harness that does not exist yet.
 
 ## 2. Run investigators
 
-For each selected finding, launch the `Argus:investigator` agent with a
-self-contained prompt: repo path, plugin root (`${CLAUDE_PLUGIN_ROOT}`), and
-the finding as JSON (rule, severity, function, file, line, message, chain,
-trace evidence). Run at most 3 in parallel. Do not investigate the same
-function twice in one round; merge findings that share a leaf.
+For each item, launch the `Argus:investigator` agent with a self-contained
+prompt containing:
+- the repo path;
+- the plugin root;
+- the item JSON, verbatim.
 
-Each investigator returns one JSON verdict. Collect them.
+Run at most 3 at a time. Each returns one JSON verdict.
 
-## 3. Aggregate
+## 3. Aggregate and record
 
 ```bash
 python "<plugin-root>/scripts/auditor_cli.py" repro "<repo>"
+python "<plugin-root>/scripts/auditor_cli.py" record "<repo>" --file .audit/round-verdicts.json
 ```
 
-This reruns every reproduction under `.audit/repros/` and writes
-`.audit/repro.md` and `.audit/repro.json` with per-test outcomes and the
-evidence lines. A verdict only stands if its test still passes here.
+`repro` reruns every reproduction under `.audit/repros/`. Write the collected
+verdicts as a JSON list to `.audit/round-verdicts.json` before running
+`record`. A verdict only stands if its test passes in the aggregate run; the
+ledger downgrades any that do not.
 
 ## 4. Report
 
 A table: finding · verdict · trigger · measured effect · extreme case ·
 smallest fix · repro file. Then:
 
-- **Rejected** findings with the investigator's reason (these improve the rules).
-- **Inconclusive** ones with what blocked them (missing mock, non-Python).
-- The reproduction files stay under `.audit/repros/` so the user can move
-  the useful ones into the test suite.
+- **Rejected** findings with the investigator's reason. These improve the rules.
+- **Inconclusive** findings with what blocked them (a missing mock, a
+  non-Python target).
+- The reproduction files stay under `.audit/repros/`, so the user can move the
+  useful ones into the test suite.
+- `report "<repo>"` writes the combined report (`.audit/report.html`) whenever
+  the user wants it.
 
 Do not fix code in this skill. The user decides which fixes to apply, and the
 `audit-map` fix guardrails apply when they do.

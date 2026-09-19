@@ -12,7 +12,7 @@ FIX = FIXTURES / "py_runtime"
 
 @pytest.fixture(scope="module")
 def srv():
-    spec = importlib.util.spec_from_file_location("mcp_server", ROOT / "plugins" / "repo-auditor" / "scripts" / "mcp_server.py")
+    spec = importlib.util.spec_from_file_location("mcp_server", ROOT / "plugins" / "argus" / "scripts" / "mcp_server.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -21,7 +21,20 @@ def srv():
 def test_tools_registered(srv):
     import asyncio
     names = {t.name for t in asyncio.run(srv.server.list_tools())}
-    assert names == {"audit_map", "audit_trace", "run_repro"}
+    assert names == {"audit_map", "audit_trace", "run_repro", "audit_queue", "audit_record", "audit_report"}
+
+
+def test_round_loop_over_mcp(srv, tmp_path):
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURES / "effects" / "python", repo)
+    srv.audit_map(str(repo))
+    q = srv.audit_queue(str(repo), budget=2, per_round=2)
+    assert q["round"] == 1 and len(q["items"]) == 2
+    rec = srv.audit_record(str(repo), [{"finding": q["items"][0]["id"], "verdict": "rejected", "reason": "test"}])
+    assert rec["recorded"] == [q["items"][0]["id"]]
+    assert srv.audit_queue(str(repo))["stop"] == "budget exhausted"
+    rep = srv.audit_report(str(repo))
+    assert rep["by_status"]["rejected"] == 1 and (repo / ".audit" / "report.html").exists()
 
 
 @pytest.mark.skipif(sys.version_info < (3, 12), reason="tracer needs sys.monitoring")

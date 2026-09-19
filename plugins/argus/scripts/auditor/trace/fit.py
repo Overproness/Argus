@@ -24,6 +24,10 @@ class Fit:
     n_max: float
     samples: int
     label: str
+    log_coef: float = 0.0  # duration ≈ exp(log_coef) * n ** exponent
+
+    def predict(self, n: float) -> float:
+        return math.exp(self.log_coef) * n ** self.exponent
 
 
 def label(k: float) -> str:
@@ -61,7 +65,7 @@ def fit_power(points: list[tuple[float, float]], arg: str = "n") -> Fit | None:
     ss_res = sum((y - (k * x + c)) ** 2 for x, y in zip(xs, ys))
     ss_tot = sum((y - my) ** 2 for y in ys)
     r2 = 1 - ss_res / ss_tot if ss_tot else 1.0
-    return Fit(arg, round(k, 2), round(r2, 3), min(by_n), max(by_n), len(points), label(k))
+    return Fit(arg, round(k, 2), round(r2, 3), min(by_n), max(by_n), len(points), label(k), round(c, 4))
 
 
 def best_fit(calls) -> Fit | None:

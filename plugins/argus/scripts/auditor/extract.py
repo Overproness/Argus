@@ -13,7 +13,8 @@ from tree_sitter import Node
 from tree_sitter_language_pack import get_parser
 
 from .langs.base import LangSpec, split_top, text, walk
-from .model import Call, FileCtx, Function, HookHit
+from .model import Call, FileCtx, Function, HookHit, LoopInfo
+from .timeouts import parse_duration, sleep_duration
 
 BLOCKISH = frozenset({
     "block", "statement_block", "compound_statement", "statements", "body_statement",
@@ -227,6 +228,95 @@ def _matching_paren(s: str, i: int) -> int:
 _FOREVER = re.compile(r"\s*(while\s*\(?\s*(true|True|1)\s*\)?\s*:?|for\s*(\(\s*;\s*;\s*\))?|loop|repeat)\s*")
 
 
+# HTTP clients constructed with no configuration at all (so no timeout either).
+_UNTIMED_CLIENT = re.compile(
+    r"\bClient::new\(\)|\bClient\(\s*\)|\bnewHttpClient\(\)|\bnew\s+\w*HttpClient\(\s*\)|\bOkHttpClient\(\s*\)|"
+    r"\bhttp\.Client\{\s*\}|\bClientSession\(\s*\)|\bSession\(\s*\)|\baxios\.create\(\s*\)|\bFaraday\.new\b(?!\s*\()|"
+    r"\bnew\s+(\\?GuzzleHttp\\)?Client\(\s*\)"
+)
+_TIMEOUT_WITH = re.compile(r"\b(asyncio\.timeout|timeout_at|async_timeout\.timeout|move_on_after|fail_after)\(")
+_HANDLES = re.compile(
+    r"\b(try|except|catch|rescue)\b|\bErr\s*\(|\.is_err\(\)|\.is_ok\(\)|if let Ok|if let Err|"
+    r"err\s*[!=]=\s*nil|\.catch\(|\.isFailure|\.onFailure|\bresult\.err\b"
+)
+_SLEEPY = re.compile(r"(?i)(^|\.)(sleep|usleep|delay|sleep_for|sleep_until|backoff|wait_exponential)$")
+_EXPO = re.compile(r"\*\*|\bpow\(|\.pow\(|<<|\*=\s*2|\bexponential|\bexpo\b|\bbackoff|checked_mul|saturating_mul|"
+                   r"Math\.pow|math\.Pow|\*\s*2\b")
+_COLLECTION = re.compile(
+    r"^\s*(for|foreach)\s*\(?\s*(?:[\w&*<>\[\],\s]+?)\s*(\bin\b|\bof\b|:(?!:)|\bas\b)\s*(?!range\b|\d)"
+    r"|:=\s*range\b|\bforeach\b"
+)
+_COUNT_PATTERNS = [
+    # Python: for i in range(5) / range(1, 5)
+    (re.compile(r"\bin\s+range\(\s*(?:([\w.]+)\s*,\s*)?([\w.]+)\s*[,)]"), "range"),
+    # Rust / Swift / Kotlin / Scala: 0..5, 0..=5, 0..<5, 0 until 5, 1 to 5
+    (re.compile(r"\bin\s+\(?\s*([\w.]+)\s*(\.\.=|\.\.<|\.\.|until|to)\s*([\w.]+)|<-\s*([\w.]+)\s*(until|to)\s*([\w.]+)"),
+     "rangeop"),
+    # C-like / Go / JS / Java: i = 0; i < 5;
+    (re.compile(r"(?:=|:=)\s*(\d+)\s*;\s*\w+\s*(<=?)\s*([\w.]+)\s*;"), "cfor"),
+]
+_POLICY_BOUND = re.compile(
+    r"(?i)\b\w*(retr(y|ies)|attempts?|tries)\w*\s*(>=?|<=?|==)\s*[\w.]+|"
+    r"should_retry|RetryDecision|retry_policy|next_backoff|max_elapsed|max_retries|max_attempts|\.take\(\d+\)"
+)
+_WHILE_BOUND = re.compile(r"\bwhile\s*\(?\s*!?\s*[\w.]+\s*(<=?)\s*([\w.]+)")
+_RETRY_DECOR = re.compile(
+    r"@(?:[\w.]+\.)?(retry|retrying|on_exception|on_predicate|Retryable|Retry)\b\s*(\((?:[^()]|\([^()]*\))*\))?")
+
+
+def _const(name: str, src: str) -> int | None:
+    """Value of a simple integer constant defined in the same file (MAX_RETRIES = 5)."""
+    if re.fullmatch(r"\d+", name):
+        return int(name)
+    last = name.split(".")[-1]
+    m = re.search(rf"\b{re.escape(last)}\b\s*(?::\s*[\w<>\[\]]+\s*)?=\s*(\d+)\b", src)
+    return int(m.group(1)) if m else None
+
+
+def _count(header: str, src: str) -> tuple[str, int | None]:
+    for rx, form in _COUNT_PATTERNS:
+        m = rx.search(header)
+        if not m:
+            continue
+        if form == "range":
+            lo = _const(m.group(1), src) if m.group(1) else 0
+            hi = _const(m.group(2), src)
+            return "counted", (hi - lo if hi is not None and lo is not None else None)
+        if form == "rangeop":
+            lo_s, op, hi_s = (m.group(1), m.group(2), m.group(3)) if m.group(1) else (m.group(4), m.group(5), m.group(6))
+            lo, hi = _const(lo_s, src), _const(hi_s, src)
+            if lo is None or hi is None:
+                return "counted", None
+            return "counted", hi - lo + (1 if op in ("..=", "to") else 0)
+        lo, op, hi = int(m.group(1)), m.group(2), _const(m.group(3), src)
+        return "counted", (hi - lo + (1 if op == "<=" else 0) if hi is not None else None)
+    return "", None
+
+
+def _retry_decorator(text_: str) -> tuple[int | None, str] | None:
+    m = _RETRY_DECOR.search(text_)
+    if not m:
+        return None
+    kind, args = m.group(1), m.group(2) or ""
+    a = re.search(r"(?:stop_after_attempt\(|max_tries\s*=\s*|stop_max_attempt_number\s*=\s*|maxAttempts\s*=\s*|"
+                  r"\btries\s*=\s*|\battempts\s*=\s*)(\d+)", args)
+    if a:
+        attempts = int(a.group(1))
+    elif kind in ("Retryable", "Retry"):
+        attempts = 3  # Spring Retry / resilience4j default
+    else:
+        attempts = None  # tenacity, retrying and backoff retry forever without a stop condition
+    if re.search(r"exponential|expo\b|multiplier", args):
+        backoff = "exponential"
+    elif re.search(r"wait_fixed|constant|delay|@Backoff", args) or kind in ("Retryable", "Retry"):
+        backoff = "fixed"
+    elif kind in ("on_exception", "on_predicate"):
+        backoff = "exponential"  # backoff.on_exception always takes a wait generator
+    else:
+        backoff = "none"
+    return attempts, backoff
+
+
 def _loop_kind(n: Node) -> str:
     """"forever" for service tick loops (`loop {}`, `for {}`, `while True:`), else the node type."""
     if n.type == "loop_expression":
@@ -299,9 +389,13 @@ class FileExtractor:
         self.include_tests = include_tests
         self.tree = parser(spec.grammar).parse(self.src)
         imports = spec.imports(self.tree.root_node)
-        client_timeout = bool(spec.client_timeout and spec.client_timeout.search(
-            self.src.decode("utf8", "replace")))
-        self.fctx = FileCtx(self.rel, spec.name, imports, client_timeout)
+        self.src_text = self.src.decode("utf8", "replace")
+        m = spec.client_timeout.search(self.src_text) if spec.client_timeout else None
+        self.fctx = FileCtx(self.rel, spec.name, imports, m is not None)
+        if m is not None:  # the value, when it sits next to the configuration
+            self.fctx.client_timeout_s = parse_duration(self.src_text[m.start():m.end() + 160], spec.name)
+        else:
+            self.fctx.untimed_client = bool(_UNTIMED_CLIENT.search(self.src_text))
         self.functions: list[Function] = []
         self.hook_hits: list[tuple[str, HookHit]] = []
 
@@ -375,6 +469,7 @@ class FileExtractor:
             fn.arity = (0 if spec.arity_mode == "no_min" else 1, 1)
         else:
             fn.arity, fn.takes_self = _arity(spec, node, cont is not None)
+        fn.retry = _retry_decorator(prefix + "\n" + header)
         scan = body if body is not None else node
         nesting = 0
         stack = [(scan, 0)]
@@ -383,6 +478,7 @@ class FileExtractor:
             if n.type in spec.loop_types:
                 d += 1
                 nesting = max(nesting, d)
+                fn.loops.append(self._loop_info(n))
             if n.type in spec.call_types:
                 raw, name_node, _, scoped = callee(n)
                 line = (name_node or n).start_point[0] + 1
@@ -398,6 +494,39 @@ class FileExtractor:
         for hook in spec.hooks:
             self.hook_hits += [(fn.id, h) for h in hook(spec, node, scan, is_async)]
         self.functions.append(fn)
+
+    def _loop_info(self, n: Node) -> LoopInfo:
+        body = n.child_by_field_name("body")
+        header = _header(n, body) if body is not None else text(n).split("\n", 1)[0]
+        body_text = text(body)[:8000] if body is not None else ""
+        if _loop_kind(n) == "forever":
+            kind, bound = "forever", None
+        else:
+            kind, bound = _count(header, self.src_text)
+            if not kind:
+                m = _WHILE_BOUND.search(header)
+                if _COLLECTION.search(header):
+                    kind = "collection"
+                elif m:
+                    lim = _const(m.group(2), self.src_text)
+                    kind, bound = "conditional", (lim + (1 if m.group(1) == "<=" else 0) if lim is not None else None)
+                elif re.match(r"\s*(while|do|loop|repeat|until)\b", header):
+                    kind = "conditional"
+                else:
+                    kind = "collection"
+        sleep_s = None
+        if body is not None:
+            for c in walk(body, self._is_function):
+                if c.type in self.spec.call_types and _SLEEPY.search(normalize(callee(c)[0])):
+                    sleep_s = max(sleep_s or 0.0, sleep_duration(text(c), self.spec.name) or 0.0)
+        return LoopInfo(
+            line=n.start_point[0] + 1, end_line=n.end_point[0] + 1, kind=kind, bound=bound,
+            handles_errors=bool(_HANDLES.search(body_text)), sleep_s=sleep_s,
+            exponential=sleep_s is not None and bool(_EXPO.search(body_text)),
+            exits=bool(re.search(r"\b(break|return)\b", body_text)),
+            retryish=bool(re.search(r"(?i)(attempt|retr(y|ies)|tries|backoff)", header + body_text)),
+            policy_bound=bool(_POLICY_BOUND.search(body_text)),
+        )
 
     # calls ---------------------------------------------------------------
     def _macro_calls(self, node: Node, fn: Function, body: Node, self_names: set[str]) -> list[Call]:
@@ -442,6 +571,7 @@ class FileExtractor:
             kind = "method"
 
         has_timeout = False
+        deadline_text = ""
         context = None
         loop_kinds: list[str] = []
         passed_lambda = False
@@ -450,6 +580,11 @@ class FileExtractor:
             t = n.type
             if t in spec.loop_types:
                 loop_kinds.append(_loop_kind(n))
+            elif t == "with_statement":  # Python: async with asyncio.timeout(3):
+                head = _header(n, n.child_by_field_name("body"))
+                if _TIMEOUT_WITH.search(head):
+                    has_timeout = True
+                    deadline_text = deadline_text or head
             elif t in spec.async_scope_types:
                 context = context or "async"
             elif t in spec.lambda_types:
@@ -468,6 +603,7 @@ class FileExtractor:
                         context = "async"
                     if spec.timeout_call is not None and spec.timeout_call.search(o_path):
                         has_timeout = True
+                        deadline_text = deadline_text or text(n)[:400]
                     if (not awaited and spec.await_combinators is not None
                             and spec.await_combinators.search(o_path) and _awaited(spec, n)):
                         awaited = True
@@ -480,8 +616,19 @@ class FileExtractor:
 
         stmt = _statement(call, body)
         stmt_text = text(stmt)
+        tail = ""
+        if call.type in spec.call_types and stmt.start_byte <= call.end_byte <= stmt.end_byte:
+            tail = stmt.text[call.end_byte - stmt.start_byte:][:120].decode("utf8", "replace")
         if spec.timeout_text is not None and spec.timeout_text.search(stmt_text[:2000]):
             has_timeout = True
+        timeout_s = None
+        if deadline_text:
+            timeout_s = parse_duration(deadline_text, spec.name)
+        elif has_timeout:
+            timeout_s = parse_duration(stmt_text[:2000], spec.name)
+            if timeout_s is None and "ctx" in stmt_text:  # Go: deadline set on the context earlier
+                m = re.search(r"With(Timeout|Deadline)\([^\n]*", text(body)[: max(0, call.start_byte - body.start_byte)])
+                timeout_s = parse_duration(m.group(0), spec.name) if m else None
         return Call(
             name=name, raw=re.sub(r"\s+", " ", raw)[:120],
             path=canon(norm, imports) if norm else name,
@@ -495,4 +642,6 @@ class FileExtractor:
             self_call=kind == "method" and recv in selfish,
             argc=argc,
             stmt_line=stmt.start_point[0] + 1,
+            timeout_s=timeout_s,
+            tail=tail,
         )

@@ -14,7 +14,7 @@ from conftest import FIXTURES, ROOT
 
 from auditor.repro import harness, runner
 
-CLI = ROOT / "plugins" / "repo-auditor" / "scripts" / "auditor_cli.py"
+CLI = ROOT / "plugins" / "argus" / "scripts" / "auditor_cli.py"
 FIX = FIXTURES / "py_runtime"
 
 
@@ -72,6 +72,21 @@ def test_scaling_fits_quadratic():
     fit = harness.scaling(lambda rows: [[a * b for b in rows] for a in rows], [50, 100, 200, 400, 800, 1600],
                           lambda n: list(range(n)), repeat=5)
     assert fit is not None and 1.6 <= fit.exponent <= 2.8, fit
+
+
+def test_outage_retries_are_counted(capsys):
+    def fetch_with_retries():
+        for _ in range(3):
+            try:
+                return urllib.request.urlopen("http://127.0.0.1:9/", timeout=1).read()
+            except OSError:
+                continue
+
+    with harness.fail_connect(), harness.count_connects() as box:
+        assert fetch_with_retries() is None
+    assert box["connects"] == 3
+    assert max(box["gaps_s"]) < 0.5  # no backoff between attempts
+    assert '"kind": "connects", "connects": 3' in capsys.readouterr().out
 
 
 def test_count_calls():

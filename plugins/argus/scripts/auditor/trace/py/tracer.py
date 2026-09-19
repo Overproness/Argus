@@ -169,7 +169,7 @@ def _install_monitoring(tr: Tracer):
     m = sys.monitoring
     E = m.events
     tid = m.PROFILER_ID
-    m.use_tool_id(tid, "repo-auditor")
+    m.use_tool_id(tid, "argus")
 
     def on_start(code, off):
         if not tr.enter(sys._getframe(1), code, False):
@@ -202,7 +202,7 @@ def _install_monitoring(tr: Tracer):
 
 def install(root: Path, out_dir: Path, stall_threshold: float = 0.1, shapes: bool = True) -> Tracer:
     if not hasattr(sys, "monitoring"):
-        raise RuntimeError("repo-auditor tracing needs Python 3.12+ (sys.monitoring)")
+        raise RuntimeError("argus tracing needs Python 3.12+ (sys.monitoring)")
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = TraceWriter(out_dir / f"{os.getpid()}-{int(time.time())}.db", {
         "lang": "python", "pid": str(os.getpid()), "root": str(root), "argv": json.dumps(sys.argv),

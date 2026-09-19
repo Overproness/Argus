@@ -1,6 +1,6 @@
 ---
 name: audit-trace
-description: Run a Python program, test suite or server under the repo-auditor runtime tracer and turn static findings from audit-map into evidence. Records every repo function call with timing, event-loop stalls (blocking calls on async paths, with the call stack), N+1 fan-out counts, recursion depth and O(n^k) complexity fits. Use after audit-map when findings are labelled needs-evidence, when the user asks "does this actually block / how slow is it / does it scale", or to profile where time goes.
+description: Run a Python program, test suite or server under the argus runtime tracer and turn static findings from audit-map into evidence. Records every repo function call with timing, event-loop stalls (blocking calls on async paths, with the call stack), N+1 fan-out counts, recursion depth and O(n^k) complexity fits. Use after audit-map when findings are labelled needs-evidence, when the user asks "does this actually block / how slow is it / does it scale", or to profile where time goes.
 argument-hint: "[repo path] -- <command that exercises the code>"
 ---
 

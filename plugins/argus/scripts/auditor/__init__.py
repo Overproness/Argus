@@ -1,1 +1,1 @@
-"""Repo auditor: deterministic analysis core, shared by every harness wrapper."""
+"""Argus: deterministic analysis core, shared by every harness wrapper."""

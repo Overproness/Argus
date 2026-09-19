@@ -1,4 +1,4 @@
-# Repo Auditor: Plan
+# Argus: Plan
 
 An agent workflow that audits a codebase in small pieces. It finds extreme cases,
 looks at how they spread through the call graph, and turns every suspicion into a
@@ -19,9 +19,9 @@ LLM only decides what to investigate. Every finding needs evidence.**
 |---|---|
 | M1: static map (Rust) | ✅ done |
 | M1.5: every major language + precise call resolution | ✅ done. 12 languages, SCIP import, checked against rattler (Rust, 457 files, 3 s) and sktime (Python, 1,111 files, 10 s) |
-| M2: runtime observation + fault injection | in progress. Python tracer (`sys.monitoring`), SQLite store, stall detection, N+1 counts, complexity fitting, evidence report joined to the map. Next: Rust adapter, fault injection, safety hook |
+| M2: runtime observation + fault injection | ✅ Python: tracer (`sys.monitoring`), SQLite store, stall detection, N+1 counts, complexity fitting, evidence report joined to the map, in-process fault injection, safety hook. Open: tracers for other languages, out-of-process fault injection, linter import |
 | M3: investigator agent + generated reproduction tests | ✅ Python. `investigator` subagent, `audit-investigate` skill, in-process reproduction harness (latency/hang injection, loop-lag monitor, deadlines, scaling fits, call counts), `repro` runner, PreToolUse safety guard, MCP server (`audit_map`, `audit_trace`, `run_repro`) |
-| M4: parallel investigators, passing effects in both directions, final report | planned |
+| M4: parallel investigators, passing effects in both directions, final report | ✅ Static effect engine for all 12 languages (waits, deadlines, retries, crash-on-error). Size projections from traces. Budgeted rounds with follow-ups and suppression. Verdict ledger checked against reproductions. `audit` skill, three new MCP tools, `report.html` |
 | M5: deeper verification (deterministic simulation, performance fuzzing, invariant mining) | planned |
 
 ## Form factor
@@ -29,7 +29,7 @@ LLM only decides what to investigate. Every finding needs evidence.**
 - **Now: a Claude Code plugin.** It bundles skills, subagents, hooks (safety
   guards) and scripts.
 - **Portability: keep the logic outside the plugin.** The analysis lives in a
-  standalone CLI (`plugins/repo-auditor/scripts/auditor`). An MCP server comes
+  standalone CLI (`plugins/argus/scripts/auditor`). An MCP server comes
   next. The skills are thin `SKILL.md` files (the open Agent Skills format), so
   Codex, Gemini CLI, Cursor and others can reuse them.
 - **Later:** a headless service or GitHub Action built on the Claude Agent SDK. A
@@ -174,13 +174,20 @@ That test fails on the sync call, which proves the finding.
 ### F. Analysis techniques the agents apply
 
 - **Following effects to callers:** latency, blocking, panics and errors climb to
-  the entry points. (M1 ✅ for blocking; M4 adds the rest.)
+  the entry points. (✅ blocking in M1; ✅ worst-case waits, unbounded waits and
+  crash-on-error in M4; ✅ proven effects become caller follow-ups between
+  rounds.)
 - **Following effects to callees:** value ranges and sizes flow downstream. For
-  example, "returns ≤ 50k items" reaching an O(n²) function. (M4)
+  example, "returns ≤ 50k items" reaching an O(n²) function. (✅ from traces:
+  sizes linked caller to callee, projected with the fitted curve. Static range
+  inference is still open.)
 - **Timeout budgets:** a callee's timeout plus its retries must fit inside the
   caller's deadline. Otherwise the caller gives up first and the work is wasted.
+  (✅ `timeout-budget-exceeded`, plus `deadline-cannot-preempt` for deadlines
+  around blocking code.)
 - **Retry storms:** retries multiplied across fan-out and layers; missing backoff
-  or jitter; non-idempotent retries.
+  or jitter; non-idempotent retries. (✅ loops and decorators; jitter and
+  idempotency are open.)
 - **Tail-latency amplification:** fan-out to N services with p99 latency L gives
   roughly p99 ≈ L for any N > 1. Hedged requests and bounded concurrency help.
 - **Backpressure:** unbounded channels and queues (`unbounded_channel`,
@@ -274,23 +281,66 @@ what the agents decide.
   - `.mcp.json` + `scripts/mcp_server.py`: `audit_map`, `audit_trace`, `run_repro`.
   - Still to do: property-based and fuzzing reproductions (needs Hypothesis
     templates), non-Python harnesses.
-- **M4: orchestration.**
-  - Parallel investigators with a budget.
-  - Passing value ranges downstream and latency/failures to callers.
-  - Timeout-budget and retry-storm analysis.
-  - A final report (an HTML artifact).
+- **M4: orchestration.** ✅
+  - `effects.py` (all languages, static):
+    - Each call site's worst-case wait comes from its explicit timeout, a
+      client-level timeout, the library default, or "unbounded".
+    - Callers inherit it, capped by any deadline they wrap around the call,
+      unless the callee blocks the thread. Retry loops and retry decorators
+      multiply it.
+    - `timeouts.py` reads durations for every language: `from_secs`,
+      `timeout=`, `5*time.Second`, `ofSeconds`, `FromSeconds`, `CURLOPT_TIMEOUT`,
+      JS milliseconds and positional `wait_for(..., 10)`.
+    - Findings: `deadline-cannot-preempt`, `timeout-budget-exceeded`,
+      `hang-reaches-entry`, `retry-without-backoff`, `unbounded-retry`,
+      `retry-amplification`, `panic-on-io-error` (Rust `unwrap`/`expect`,
+      Swift `try!`), `ignored-io-error` (Go `_`).
+    - A summary goes into `map.json` → `effects`: entry points with their worst
+      wait, every deadline with its status, every retry site.
+    - Calibrated on rattler:
+      - retry loops bounded by a counter or retry policy are not "unbounded";
+      - one attempt is not a retry;
+      - `unwrap` only counts when applied to the call's own result;
+      - a client configured elsewhere in the repo is assumed to carry its
+        timeout, unless the file builds an unconfigured client itself.
+  - Sizes flowing downstream (`trace/evidence.py` → `projections`):
+    - a callee's input size is linked to its caller's when they match in one
+      activation;
+    - the largest upstream size, or `--assume ARG=N`, is fed through the fit
+      (`Fit.predict`) to project cost.
+  - `orchestrate.py` + CLI `queue` / `record` / `report`:
+    - ranked, budgeted rounds (total, per round, max rounds), with merging by
+      leaf;
+    - skip reasons for everything not queued;
+    - `propagated:<rule>` follow-ups at the callers of confirmed findings
+      (entry points and deadlines first);
+    - `wrong_edge` suppression from rejected verdicts;
+    - a ledger in `.audit/verdicts.json` that downgrades "confirmed" when the
+      reproduction does not pass;
+    - stop reasons: budget, rounds, or nothing left.
+  - `report_html.py`: `report.{json,md,html}`. The page follows the artifact
+    contract (theme-aware, self-contained, filterable, with an evidence track
+    per finding).
+  - `skills/audit` runs the whole loop. `audit-investigate` is now one round
+    through the same queue and ledger. MCP gained `audit_queue`,
+    `audit_record` and `audit_report`. The harness gained `fail_connect()` and
+    `count_connects()` for retry reproductions.
 - **M5: deep verification.**
   - Deterministic simulation (turmoil/madsim) for Rust services.
   - Performance fuzzing on hot functions.
   - Daikon-style invariant mining.
   - Kani/CrossHair on critical maths.
 - **Backlog of static rules:**
-  - retry without backoff;
-  - unbounded retries;
+  - ✅ retry without backoff, unbounded retries, retry amplification (M4);
+  - ✅ `unwrap`/`expect` on network and DB results (M4). Open: panics on parsed
+    external data (JSON fields, index access);
+  - retries without jitter, and non-idempotent retries (POST without an
+    idempotency key);
+  - retry libraries configured by call rather than decorator (tokio-retry,
+    `backoff::retry`, retry-go, Polly, p-retry);
   - unbounded channels and queues;
   - sequential awaits that could run concurrently;
   - spawns never joined;
-  - `unwrap`/panic on external data;
   - floats for money;
   - `SystemTime` used for intervals;
   - regexes with catastrophic backtracking;

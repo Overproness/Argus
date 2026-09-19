@@ -21,6 +21,23 @@ class Call:
     self_call: bool = False
     argc: int | None = None  # None: unknown
     stmt_line: int = 0  # first line of the enclosing statement
+    timeout_s: float | None = None  # parsed deadline/timeout value, when has_timeout
+    tail: str = ""  # statement text right after this call (what happens to its result)
+
+
+@dataclass
+class LoopInfo:
+    """A loop, described enough to tell retry loops from iteration."""
+    line: int
+    end_line: int
+    kind: str  # "forever" | "counted" | "conditional" | "collection"
+    bound: int | None  # iteration count when it is a literal (or a literal constant)
+    handles_errors: bool  # try/except, match Err, `err != nil`, .catch ... inside the body
+    sleep_s: float | None  # delay between iterations when a sleep call is present (0.0 if unparsed)
+    exponential: bool  # the delay grows (2 ** n, pow, <<, backoff helpers)
+    exits: bool = False  # break/return inside: stops once something succeeds
+    retryish: bool = False  # attempt/retry/tries/backoff naming in the loop
+    policy_bound: bool = False  # bounded by a counter check or a retry-policy object inside the body
 
 
 @dataclass
@@ -41,6 +58,9 @@ class Function:
     private: bool = False  # not callable from other modules (Rust non-pub, Go lowercase, `private`)
     max_loop_depth: int = 0
     calls: list[Call] = field(default_factory=list)
+    loops: list[LoopInfo] = field(default_factory=list)
+    # Function-level retry (tenacity/backoff decorators, @Retryable): (attempts or None=unbounded, backoff)
+    retry: tuple[int | None, str] | None = None
 
 
 @dataclass
@@ -50,6 +70,8 @@ class FileCtx:
     imports: dict[str, str]  # alias -> dotted path; keys starting with "\0" are unaliased imports
     client_timeout: bool
     functions: list[str] = field(default_factory=list)  # function ids, in source order
+    client_timeout_s: float | None = None  # value of a client-level timeout configured in this file
+    untimed_client: bool = False  # this file builds an HTTP client with no timeout configured
 
     def imported(self, rx) -> bool:
         return any(rx.search(v) for v in self.imports.values())
@@ -64,7 +86,8 @@ class Edge:
     context: str
     loop_depth: int
     loop_kinds: list[str]
-    confidence: str  # "exact" | "scip" | "name"
+    confidence: str  # "exact" | "scip" | "unique" | "name"
+    timeout_s: float | None = None  # deadline the caller wraps around this call
 
 
 @dataclass

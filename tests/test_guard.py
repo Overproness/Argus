@@ -6,7 +6,7 @@ import sys
 import pytest
 from conftest import ROOT
 
-GUARD = ROOT / "plugins" / "repo-auditor" / "scripts" / "hooks" / "guard.py"
+GUARD = ROOT / "plugins" / "argus" / "scripts" / "hooks" / "guard.py"
 
 
 def hook(tool, **tool_input):

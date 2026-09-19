@@ -9,6 +9,7 @@ import re
 from collections import defaultdict, deque
 from pathlib import Path, PurePosixPath
 
+from . import effects
 from .extract import FileExtractor
 from .langs import SPECS, spec_for
 from .langs.base import DB, FS, NET, LangSpec
@@ -91,6 +92,7 @@ class RepoMap:
         self.hook_hits: list[tuple[str, HookHit]] = []
         self.parse_errors: list[str] = []
         self.skipped_large: list[str] = []
+        self.effects: dict = {"entries": [], "deadlines": [], "retries": []}
 
     # building -------------------------------------------------------------
     def load(self) -> "RepoMap":
@@ -116,6 +118,10 @@ class RepoMap:
 
     def spec(self, fn: Function) -> LangSpec:
         return SPEC_BY_NAME[fn.lang]
+
+    @staticmethod
+    def family_of(lang: str) -> str:
+        return family(lang)
 
     def _index(self):
         self.free_by_name = defaultdict(list)
@@ -189,7 +195,8 @@ class RepoMap:
                     self.unresolved.append((fn, call))
                 for c in cands:
                     self.edges.append(Edge(fn.id, c.id, call.line, call.awaited, call.context,
-                                           call.loop_depth, call.loop_kinds, conf))
+                                           call.loop_depth, call.loop_kinds, conf,
+                                           call.timeout_s if call.has_timeout else None))
         self.out_edges = defaultdict(list)
         self.in_edges = defaultdict(list)
         for e in self.edges:
@@ -345,6 +352,10 @@ class RepoMap:
                 "Recursive cycle; check that depth is bounded on extreme inputs.",
                 chain=[fns[i].qualname for i in scc],
             ))
+
+        # Waits, deadlines, retries and crashes, propagated across the call graph.
+        fx_findings, self.effects = effects.analyze(self)
+        F.extend(fx_findings)
 
         F.sort(key=lambda f: (SEVERITY_ORDER[f.severity], f.file, f.line, f.rule))
 

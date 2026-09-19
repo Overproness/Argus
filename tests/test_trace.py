@@ -7,7 +7,7 @@ import sys
 import pytest
 from conftest import FIXTURES, ROOT
 
-CLI = ROOT / "plugins" / "repo-auditor" / "scripts" / "auditor_cli.py"
+CLI = ROOT / "plugins" / "argus" / "scripts" / "auditor_cli.py"
 FIX = FIXTURES / "py_runtime"
 
 pytestmark = pytest.mark.skipif(sys.version_info < (3, 12), reason="tracer needs sys.monitoring")

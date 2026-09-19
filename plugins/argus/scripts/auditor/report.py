@@ -16,7 +16,7 @@ def to_json(m: RepoMap) -> dict:
     precise_files = m.precise.files if m.precise else set()
     return {
         "meta": {
-            "tool": "repo-auditor/map",
+            "tool": "argus/map",
             "version": 2,
             "root": str(m.root),
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -51,8 +51,10 @@ def to_json(m: RepoMap) -> dict:
             "default_timeout": b.default_timeout,
             "loop_depth": b.call.loop_depth,
             "confidence": b.confidence,
+            "timeout_s": b.call.timeout_s,
             "snippet": b.call.snippet,
         } for b in m.boundaries],
+        "effects": m.effects,
         "hotspots": m.hotspots(),
         "functions": [{
             "id": f.id, "lang": f.lang, "qualname": f.qualname, "is_async": f.is_async,
@@ -62,7 +64,7 @@ def to_json(m: RepoMap) -> dict:
             "caller": fns[e.caller].qualname, "callee": fns[e.callee].qualname,
             "caller_id": e.caller, "callee_id": e.callee,
             "line": e.line, "awaited": e.awaited, "context": e.context,
-            "loop_depth": e.loop_depth, "confidence": e.confidence,
+            "loop_depth": e.loop_depth, "confidence": e.confidence, "deadline_s": e.timeout_s,
         } for e in m.edges],
     }
 
@@ -116,6 +118,37 @@ def to_markdown(data: dict, max_findings: int = 200, max_rows: int = 150) -> str
     if len(data["boundaries"]) > max_rows:
         out.append(f"\n_…{len(data['boundaries']) - max_rows} more in map.json._")
     out.append("")
+
+    fx = data.get("effects") or {}
+    if fx.get("entries") or fx.get("deadlines") or fx.get("retries"):
+        out.append("## Effects across the call graph\n")
+        out.append("_Static upper bounds: timeouts, library defaults and retry counts multiplied along each path._\n")
+    if fx.get("entries"):
+        out.append("**Entry points**: longest wait one activation can hit\n")
+        out.append("| Entry | Location | Worst wait | How | Max attempts per request |")
+        out.append("|---|---|---|---|---|")
+        for e in fx["entries"]:
+            how = e["formula"] or ""
+            path = " → ".join(e["path"][-3:])
+            out.append(f"| `{_cell(e['function'])}` | {e['location']} | {e['max_wait']} | "
+                       f"{_cell(how)} via {_cell(path)} | {e['max_attempts_per_request'] or '∞'} |")
+        out.append("")
+    if fx.get("deadlines"):
+        out.append("**Deadlines**: an outer timeout around an inner call\n")
+        out.append("| Caller | Callee | Location | Deadline | Inner worst wait | Status |")
+        out.append("|---|---|---|---|---|---|")
+        for d in fx["deadlines"]:
+            out.append(f"| `{_cell(d['caller'])}` | `{_cell(d['callee'])}` | {d['location']} | "
+                       f"{d['deadline_s']:g} s | {_cell(d['inner_wait'])} | {d['status']} |")
+        out.append("")
+    if fx.get("retries"):
+        out.append("**Retry sites**\n")
+        out.append("| Function | Location | Kind | Attempts | Backoff |")
+        out.append("|---|---|---|---|---|")
+        for r in fx["retries"]:
+            att = "∞" if r["attempts"] is None else (r["attempts"] or "bounded (policy/counter)")
+            out.append(f"| `{_cell(r['function'])}` | {r['location']} | {r['kind']} | {att} | {r['backoff']} |")
+        out.append("")
 
     out.append("## Hotspots\n")
     out.append("| Score | Function | Location | Loop nesting | Fan-in | Async |")

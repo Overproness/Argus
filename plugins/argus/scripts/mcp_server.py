@@ -46,8 +46,11 @@ def audit_map(repo: str, include_tests: bool = False, out: str | None = None, ma
 
 @server.tool()
 def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bool = True,
-                out: str | None = None) -> dict:
-    """Run `command` (argv list) under the Python runtime tracer and join the trace to map.json. Writes .audit/trace.{json,md}."""
+                out: str | None = None, assume: dict[str, float] | None = None) -> dict:
+    """Run `command` (argv list) under the Python runtime tracer and join the trace to map.json. Writes .audit/trace.{json,md}.
+
+    `assume` projects super-linear functions to input sizes you expect in production, e.g. {"rows": 50000}.
+    """
     from auditor.trace import evidence, run as trace_run, store
 
     root = Path(repo).resolve()
@@ -60,12 +63,13 @@ def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bo
     if not t.calls:
         return {"error": "no trace data recorded (traced program must be Python 3.12+ inside the repo)",
                 "exit_code": rc}
-    jp, mp = evidence.write(map_path, t, out_dir)
+    jp, mp = evidence.write(map_path, t, out_dir, assume)
     data = json.loads(jp.read_text(encoding="utf8"))
     return {"exit_code": rc, "trace_json": str(jp), "trace_md": str(mp), "summary": data["summary"],
             "findings": [{k: f[k] for k in ("rule", "severity", "function", "file", "line")} | {"evidence": f["evidence"]}
                          for f in data["findings"]],
-            "unpredicted_stalls": data["unpredicted_stalls"], "complexity": data["complexity"]}
+            "unpredicted_stalls": data["unpredicted_stalls"], "complexity": data["complexity"],
+            "projections": data["projections"]}
 
 
 @server.tool()
@@ -79,6 +83,55 @@ def run_repro(repo: str, file: str | None = None, timeout: int = 600, out: str |
     jp, mp = runner.write(res, out_dir)
     return {"repro_json": str(jp), "repro_md": str(mp), "exit_code": res["exit_code"], "tests": res["tests"],
             "output_tail": res["output_tail"] if res["exit_code"] not in (0, 1) else ""}
+
+
+@server.tool()
+def audit_queue(repo: str, budget: int | None = None, per_round: int | None = None, max_rounds: int | None = None,
+                rules: list[str] | None = None, include_low: bool = False, dry_run: bool = False,
+                out: str | None = None) -> dict:
+    """Open the next investigation round: ranked, budgeted findings to reproduce (.audit/queue.json).
+
+    Returns `stop` (why no round was opened) or `items` to hand to investigators, plus skipped findings
+    with reasons. Budget flags are remembered in .audit/verdicts.json after the first call.
+    """
+    from auditor import orchestrate
+
+    out_dir = _out(Path(repo).resolve(), out)
+    if not (out_dir / "map.json").exists():
+        return {"error": f"{out_dir / 'map.json'} missing; call audit_map first"}
+    return orchestrate.queue(out_dir, {"total": budget, "per_round": per_round, "max_rounds": max_rounds},
+                             set(rules) if rules else None, include_low, False, False, dry_run)
+
+
+@server.tool()
+def audit_record(repo: str, verdicts: list[dict], out: str | None = None) -> dict:
+    """Record investigator verdicts ({finding, verdict: confirmed|rejected|inconclusive, ...}) in the ledger.
+
+    A confirmed verdict whose reproduction does not pass in the latest run_repro is downgraded to inconclusive.
+    """
+    from auditor import orchestrate
+
+    out_dir = _out(Path(repo).resolve(), out)
+    if not (out_dir / "map.json").exists():
+        return {"error": f"{out_dir / 'map.json'} missing; call audit_map first"}
+    return orchestrate.record(out_dir, verdicts)
+
+
+@server.tool()
+def audit_report(repo: str, out: str | None = None) -> dict:
+    """Write the final report from map, trace, reproductions and verdicts: .audit/report.{json,md,html}."""
+    from auditor import orchestrate, report_html
+
+    out_dir = _out(Path(repo).resolve(), out)
+    if not (out_dir / "map.json").exists():
+        return {"error": f"{out_dir / 'map.json'} missing; call audit_map first"}
+    data = orchestrate.final(out_dir)
+    paths = report_html.write(data, out_dir)
+    proven = [{k: f.get(k) for k in ("id", "severity", "file", "line")} | {
+        "extreme_case": (f.get("verdict") or {}).get("extreme_case"),
+        "smallest_fix": (f.get("verdict") or {}).get("smallest_fix")} for f in data["findings"] if f["status"] == "proven"]
+    return {"report_html": str(paths[2]), "report_md": str(paths[1]), "report_json": str(paths[0]),
+            "by_status": data["summary"]["by_status"], "proven": proven, "effects": data["effects"]}
 
 
 if __name__ == "__main__":

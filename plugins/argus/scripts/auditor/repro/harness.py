@@ -6,6 +6,8 @@ making the predicted effect happen under controlled conditions:
 
   latency(2.0)          every outbound socket connect waits 2 s (a slow peer)
   hang()                connects never complete (a dead peer)
+  fail_connect()        every connect fails at once (an outage), to drive retry logic
+  count_connects()      counts connect attempts and the gaps between them (retries, backoff)
   loop_monitor()        measures how long the asyncio loop went unresponsive
   call_with_deadline()  runs a blocking call in a thread and gives up after N s
   scaling()             times a function at several input sizes and fits O(n^k)
@@ -58,6 +60,50 @@ def latency(seconds: float, hosts: tuple[str, ...] | None = None):
 def hang(hosts: tuple[str, ...] | None = None):
     """A peer that never answers. Pair with call_with_deadline or loop_monitor."""
     return latency(3600, hosts)
+
+
+@contextmanager
+def fail_connect(hosts: tuple[str, ...] | None = None, error: type[OSError] = ConnectionRefusedError):
+    """Every connect (to `hosts`, or to all hosts) fails immediately: an outage."""
+    original = socket.socket.connect
+
+    def failing(self, addr):
+        if hosts is None or _host_of(addr) in hosts:
+            raise error(f"simulated outage: connect to {addr} refused")
+        return original(self, addr)
+
+    socket.socket.connect = failing
+    try:
+        yield
+    finally:
+        socket.socket.connect = original
+
+
+@contextmanager
+def count_connects(hosts: tuple[str, ...] | None = None):
+    """Count connect attempts inside the block. Yields {'connects', 'gaps_s'}; combine with fail_connect()
+    (enter fail_connect first) to see how many times retry logic tries and how long it waits between tries."""
+    original = socket.socket.connect
+    box: dict = {"connects": 0, "gaps_s": []}
+    stamps: list[float] = []
+
+    def counting(self, addr):
+        if hosts is None or _host_of(addr) in hosts:
+            now = time.perf_counter()
+            if stamps:
+                box["gaps_s"].append(round(now - stamps[-1], 4))
+            stamps.append(now)
+            box["connects"] += 1
+        return original(self, addr)
+
+    socket.socket.connect = counting
+    try:
+        yield box
+    finally:
+        socket.socket.connect = original
+        gaps = box["gaps_s"]
+        evidence(kind="connects", connects=box["connects"],
+                 min_gap_s=min(gaps) if gaps else None, max_gap_s=max(gaps) if gaps else None)
 
 
 @contextmanager

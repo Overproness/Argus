@@ -1,6 +1,6 @@
 ---
 name: audit-map
-description: Build a static audit map of a repository in any major language (Rust, Python, JS/TS, Go, Java, Kotlin, Scala, C#, Swift, C/C++, Ruby, PHP) and triage its findings. The map covers the call graph, a list of every I/O and external call, and hotspots. Findings include blocking calls on async paths (including through call chains), external calls without timeouts, I/O in loops (N+1), sync locks held across await, sync-over-async, unbounded goroutines, and recursion. Use when the user wants to audit a repo for performance or reliability risks, find extreme cases, or asks "what could blow up in this codebase".
+description: Build a static audit map of a repository in any major language (Rust, Python, JS/TS, Go, Java, Kotlin, Scala, C#, Swift, C/C++, Ruby, PHP) and triage its findings. The map covers the call graph, a list of every I/O and external call, hotspots, and effects propagated across calls (worst-case waits, deadlines, retries). Findings include blocking calls on async paths (including through call chains), external calls without timeouts, I/O in loops (N+1), sync locks held across await, sync-over-async, deadlines that cannot fire, timeout budgets exceeded, entry points that can hang, retry storms, crash-on-network-error, unbounded goroutines and recursion. Use when the user wants to audit a repo for performance or reliability risks, find extreme cases, or asks "what could blow up in this codebase".
 argument-hint: "[repo path, default: current directory]"
 ---
 
@@ -53,6 +53,15 @@ Read `.audit/map.md`. Then, for each **high** and **medium** finding, in order:
    - a timeout configured on a client built in another file (the finding names
      candidate files);
    - code that only runs at startup or in a CLI, where blocking is harmless.
+
+   Effect findings (`deadline-cannot-preempt`, `timeout-budget-exceeded`,
+   `hang-reaches-entry`, `retry-*`, `panic-on-io-error`, `ignored-io-error`)
+   come from the **Effects across the call graph** section of `map.md`: worst
+   waits per entry point, every deadline, every retry site. Check the numbers
+   against the code. The durations are parsed from source, so a timeout that
+   comes from config, an environment variable or a retry-policy object is
+   invisible and shows up as unbounded or unknown. Say so rather than
+   confirming.
 3. Label it **confirmed**, **rejected (reason)** or **needs-evidence**.
    Blocking-in-async and timeout findings are usually confirmable by reading the
    code. Magnitude ("how slow", "how often", "how big does n get") needs runtime

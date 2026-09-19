@@ -8,8 +8,8 @@
   "plugins": [
     {
       "name": "Argus",
-      "source": "./plugins/repo-auditor",
-      "description": "Agentic repo auditor for extreme cases and composition bugs."
+      "source": "./plugins/argus",
+      "description": "Agentic auditor for extreme cases and composition bugs."
     }
   ]
 }
