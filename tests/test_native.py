@@ -96,6 +96,15 @@ def test_proxy_mode_and_faults_changed_mid_run():
 
 # --- observing any program -----------------------------------------------------------------------
 
+def test_commands_resolve_like_a_shell():
+    from auditor.procs import resolve
+    assert resolve(["./local-tool", 1]) == ["./local-tool", "1"]  # paths are left alone
+    if sys.platform == "win32" and has("npm"):
+        assert resolve(["npm", "--version"])[0].lower().endswith(".cmd")  # the shim CreateProcess cannot find
+    if has("npm"):
+        assert native.run_target(["npm", "--version"], timeout=60, emit=False)["exit_code"] == 0
+
+
 def test_run_target_heartbeat_gap_and_evidence(tmp_path):
     script = tmp_path / "tick.py"
     script.write_text(

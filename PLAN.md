@@ -28,7 +28,7 @@ A capability that works in one language only is a gap, not a feature. See
 | M2: runtime observation + fault injection | ✅ Python: tracer (`sys.monitoring`), SQLite store, stall detection, N+1 counts, complexity fitting, evidence report joined to the map, in-process fault injection, safety hook. Open: tracers for other languages, out-of-process fault injection, linter import |
 | M3: investigator agent + generated reproduction tests | ✅ Python in-process; every other language through M5 P1 (fault server plus black-box runs or native probes; Rust verified end to end with real investigator subagents). `investigator` subagent, `audit-investigate` skill, in-process reproduction harness (latency/hang injection, loop-lag monitor, deadlines, scaling fits, call counts), `repro` runner, PreToolUse safety guard, MCP server (`audit_map`, `audit_trace`, `run_repro`) |
 | M4: parallel investigators, passing effects in both directions, final report | ✅ Static effect engine for all 12 languages (waits, deadlines, retries, crash-on-error). Size projections from traces. Budgeted rounds with follow-ups and suppression. Verdict ledger checked against reproductions. `audit` skill, three new MCP tools, `report.html` |
-| M5: language parity: every capability in every language | in progress. ✅ P1 language-neutral reproduction (fault server, evidence protocol, native probes). ✅ P2a language-neutral runtime evidence (OpenTelemetry receiver and importer, span-to-function mapping, observed external calls, heartbeat stalls with attribution). Open: P2b native tracers, P3–P5; see [Language parity](#language-parity) |
+| M5: language parity: every capability in every language | in progress. ✅ P1 language-neutral reproduction (fault server, evidence protocol, native probes). ✅ P2a language-neutral runtime evidence (OpenTelemetry receiver and importer, span-to-function mapping, observed external calls, heartbeat stalls with attribution). P2b native tracers: ✅ Node (V8 profile + coverage, automatic), ✅ profile import (`.cpuprofile`, speedscope); Rust, Go, JVM, .NET open. Open: P3–P5; see [Language parity](#language-parity) |
 | M6: deeper verification (deterministic simulation, performance fuzzing, invariant mining) | planned |
 
 ## Form factor
@@ -57,7 +57,7 @@ give (for example, function-level timings).
 | Precise calls | SCIP (one reader for every indexer) | LSP call hierarchy where no indexer exists |
 | Fault injection | **fault server**: a local mock API or TCP proxy with latency, hang, reset and fail-first-N; counts every connection | Python in-process socket patches |
 | Reproduction | pytest wrappers drive any command; **`@@evidence` lines on stdout** from any language; **black-box** runs of the real program against the fault server | **native probes**: a small program in the target language, in a side project under `.audit/repros/native/` that depends on the repo by path, so the repo is never modified |
-| Runtime evidence | ✅ an OpenTelemetry receiver (OTLP/HTTP, protobuf and JSON, gzip) and file importer; spans mapped to map functions; client spans become observed external calls; ✅ heartbeat stalls (gaps between a program's own output lines), attributed to the deepest span covering the gap | function-level tracers: Python `sys.monitoring` ✅; Rust `tracing` layer, Node inspector, Go runtime/trace, JVM JFR, .NET EventPipe to do |
+| Runtime evidence | ✅ an OpenTelemetry receiver (OTLP/HTTP, protobuf and JSON, gzip) and file importer; spans mapped to map functions; client spans become observed external calls; ✅ heartbeat stalls (gaps between a program's own output lines), attributed to the deepest span covering the gap; ✅ sampling-profile import (V8 `.cpuprofile`, speedscope) | function-level tracers: Python `sys.monitoring` ✅; Node V8 profiler + coverage ✅; Rust `tracing` layer, Go runtime/trace, JVM JFR, .NET EventPipe to do |
 | Linter evidence | SARIF import (one importer; most linters emit SARIF) | a table of linter commands |
 | Verification of Argus itself | a CI matrix that installs every toolchain | one fixture per language per capability |
 
@@ -69,8 +69,8 @@ give (for example, function-level timings).
 |---|---|---|---|---|---|---|---|
 | Python | ✅ | ✅ | ◐ | ✅ tracer + OTLP | ✅ | ✅ in-process | ✗ |
 | Rust | ✅ | ✅ | ✅ | ◐ OTLP (SDK) | ✅ | ✅ | ✗ |
-| JavaScript | ✅ | ✅ | ◐ | ✅ external calls via Node auto-instrumentation; own functions need spans | ✅ | ✅ | ✗ |
-| TypeScript | ✅ | ✅ | ◐ | ◐ same Node path as JavaScript | ✅ | ◐ (needs `tsx`) | ✗ |
+| JavaScript | ✅ | ✅ | ◐ | ✅ V8 profiler + coverage (functions, stalls, exact counts), no setup; OTLP for external calls | ✅ | ✅ | ✗ |
+| TypeScript | ✅ | ✅ | ◐ | ◐ same Node profiler (runs under `tsx`/`ts-node`; transpiled lines map by function name) | ✅ | ◐ (needs `tsx`) | ✗ |
 | Go | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
 | Java | ✅ | ✅ | ◐ | ✅ OTLP (Java agent) | ✅ | ✅ | ✗ |
 | Kotlin | ✅ | ✅ | ◐ | ◐ OTLP (Java agent) | ◐ | ◐ | ✗ |
@@ -82,11 +82,17 @@ give (for example, function-level timings).
 | Ruby | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
 | PHP | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
 
-"Runtime evidence" means OpenTelemetry spans through Argus's receiver. The
-protocol side is verified (real Python SDK exporter, official Java agent). A
-language stays ◐ until a real program in it has been traced in the tests.
-Heartbeat stalls work for any program that prints periodically, whatever its
-language (verified on Node and Python programs), so they get no column.
+"Runtime evidence" means OpenTelemetry spans through Argus's receiver, or a
+native channel where one is named. The protocol side is verified (real Python
+SDK exporter, official Java agent). A language stays ◐ until a real program in
+it has been traced in the tests.
+
+Two channels are not tied to a language, so they get no column:
+- Heartbeat stalls work for any program that prints periodically (verified on
+  Node and Python programs).
+- Profile import reads V8 `.cpuprofile` and speedscope JSON, which py-spy
+  (Python), rbspy (Ruby) and dotnet-trace (.NET) export. It is verified on
+  synthetic files only.
 
 The black-box path runs any command, so it works in every language as soon as
 the program can be pointed at the fault server (an environment variable, config
@@ -121,13 +127,46 @@ C and C++ programs were run for scaling.
       derives the Java agent's method list (`OTEL_INSTRUMENTATION_METHODS_INCLUDE`)
       from the map's JVM findings and entry points, so no setup is needed for
       function-level spans on the JVM.
-      Also verified with Node's auto-instrumentation (--require), whose chunked uploads the receiver now decodes: external calls observed, and findings in files without function spans reported as 
-ot-traced rather than 
-ot-exercised. Heartbeats verified on a Node program.
+    - Also verified with Node's auto-instrumentation (`--require`), whose
+      chunked uploads the receiver decodes: external calls observed, and
+      findings in files without function spans reported as `not-traced`
+      rather than `not-exercised`. Heartbeats verified on a Node program.
   - **P2b Native function-level tracers** for languages whose OpenTelemetry
-    setup needs code changes, or to go deeper than spans: Rust (`tracing`
-    layer), Node (inspector plus `monitorEventLoopDelay`), JVM (JFR), Go
-    (runtime/trace), .NET (EventPipe).
+    setup needs code changes, or to go deeper than spans.
+    - ✅ **Node** (JavaScript, TypeScript), with no code change and no
+      dependency. `trace` sets `--cpu-prof` (a V8 sampling profile every
+      0.5 ms) and `NODE_V8_COVERAGE` (exact per-function call counts) for every
+      Node process the command starts. It does this automatically for `node`,
+      `npm`, `npx`, `yarn`, `pnpm`, `tsx` and `ts-node`.
+      - Stalls: within each busy stretch of the event loop, a function
+        continuously on the stack longer than the threshold is a stall. The
+        deepest such function is the culprit, and the sampled leaf names the
+        blocking call (`spawnSync`).
+      - N+1: coverage counts give the fan-out as a ratio.
+      - The profile clock is aligned with epoch time from an
+        (epoch, `perf_counter`) pair recorded at launch; V8 uses the same
+        monotonic clock. So a heartbeat gap that a profile stall explains is
+        reported once, under the function.
+      - Verified end to end: `blocking-in-async` confirmed with the blocking
+        call named; `io-in-loop` confirmed from counts; an unpredicted CPU
+        stall found; heartbeat and OTLP combined with the profiler.
+    - ✅ **Profile import** (`trace-import --profile`, `audit_trace_import`):
+      - a V8 `.cpuprofile` (Chrome or Deno DevTools);
+      - speedscope JSON, sampled or evented, the format py-spy, rbspy,
+        dotnet-trace and others export. Stalls need idle samples; runs without
+        them report stall rules as `not-verifiable`.
+
+      Verified on synthetic files. The real exporters have not been run in
+      the tests yet.
+    - Open:
+      - Rust: a `tracing` layer, or an import of Chrome trace-event JSON,
+        which `tracing-chrome` writes with one event pair per poll, so a long
+        poll is a stall;
+      - Go: runtime/trace or pprof;
+      - JVM: JFR or async-profiler;
+      - .NET: verify dotnet-trace's speedscope export;
+      - Ruby: verify rbspy;
+      - Swift, C, C++: perf or samply.
 - **P3 Linter evidence**: a SARIF importer plus a runner table (clippy via
   clippy-sarif, ruff, golangci-lint, eslint, detekt, Roslyn analyzers, semgrep,
   PMD/SpotBugs, RuboCop, PHPStan, SwiftLint). Imported results confirm or
@@ -457,8 +496,22 @@ what the agents decide.
 
     `evidence.py` needed no change for stalls: attributed heartbeat stalls use
     the same stack format as the Python tracer's.
-  - P2b native tracers, P3 SARIF linter import, P4 SCIP/LSP everywhere, P5 CI
-    matrix, evaluation corpus: open.
+  - P2b, partly done (`trace/profiles.py`, `trace/sources.py`, `trace --node`,
+    `trace-import --profile/--coverage`, MCP `audit_trace_import`):
+    - readers for V8 `.cpuprofile` and speedscope (sampled and evented), and
+      V8 coverage as exact counts (`CountRec` in the trace store);
+    - `evidence.py` knows sampled runs. It never counts calls from samples.
+      It confirms N+1 findings from count ratios, and reports sampled-only
+      rules (recursion depth, complexity fits) as `not-verifiable`;
+    - a function with no map entry of its own (a closure, a module's top-level
+      code) is kept apart from map functions that share its lines;
+    - processes that never ran repo code (npm itself) are dropped;
+    - `Mapper.rel` no longer maps `node_modules/x/index.js` to the repo's
+      `index.js` by suffix.
+
+    Native tracers for Rust, Go, JVM and .NET are still open.
+  - P3 SARIF linter import, P4 SCIP/LSP everywhere, P5 CI matrix, evaluation
+    corpus: open.
 - **M6: deep verification**, in every language:
   - deterministic simulation (turmoil/madsim for Rust, Coyote for .NET,
     Lincheck for the JVM, simulated clocks elsewhere);
@@ -480,7 +533,10 @@ what the agents decide.
   - floats for money;
   - `SystemTime` used for intervals;
   - regexes with catastrophic backtracking;
-  - loading all rows without pagination.
+  - loading all rows without pagination;
+  - CPU-heavy work on an async path (busy loops, large sorts or parses inside
+    async functions). The Node profiler finds these only as unpredicted stalls
+    today.
 - **Evaluation:** a corpus of real repositories per language with known bugs as
   ground truth. Measure recall and false-positive rate per language and per
   capability on each milestone. Any user repo (a trading bot with the sync API

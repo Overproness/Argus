@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..procs import resolve
 from .harness import EVIDENCE_PREFIX, evidence
 
 WIN = sys.platform == "win32"
@@ -67,7 +68,7 @@ def run_target(cmd: list[str], cwd: str | Path | None = None, env: dict[str, str
     full_env = {**os.environ, **(env or {}), "PYTHONUNBUFFERED": "1"}
     kw = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WIN else {"start_new_session": True}
     t0 = time.perf_counter()
-    proc = subprocess.Popen([str(c) for c in cmd], cwd=cwd, env=full_env, stdout=subprocess.PIPE,
+    proc = subprocess.Popen(resolve(cmd), cwd=cwd, env=full_env, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, **kw)
     lines: list[tuple[float, str]] = []
 
@@ -453,8 +454,8 @@ def scaffold(lang: str, name: str, repo: Path | None = None, out_dir: Path | Non
 def build_probe(probe: Probe, timeout: float = 900) -> None:
     """Compile the probe outside the timed part. Raises with the compiler output on failure."""
     for cmd in probe.build:
-        r = subprocess.run(cmd, cwd=probe.dir, env={**os.environ, **probe.env}, capture_output=True, text=True,
-                           encoding="utf8", errors="replace", timeout=timeout)
+        r = subprocess.run(resolve(cmd), cwd=probe.dir, env={**os.environ, **probe.env}, capture_output=True,
+                           text=True, encoding="utf8", errors="replace", timeout=timeout)
         if r.returncode != 0:
             raise RuntimeError(f"probe build failed: {' '.join(cmd)}\n{(r.stdout + r.stderr)[-3000:]}")
 

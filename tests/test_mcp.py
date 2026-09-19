@@ -1,5 +1,6 @@
 """MCP tools call the same code paths as the CLI; exercise them in-process."""
 import importlib.util
+import json
 import shutil
 import sys
 
@@ -21,7 +22,28 @@ def srv():
 def test_tools_registered(srv):
     import asyncio
     names = {t.name for t in asyncio.run(srv.server.list_tools())}
-    assert names == {"audit_map", "audit_trace", "run_repro", "audit_queue", "audit_record", "audit_report"}
+    assert names == {"audit_map", "audit_trace", "audit_trace_import", "run_repro", "audit_queue", "audit_record",
+                     "audit_report"}
+
+
+def test_trace_import_over_mcp(srv, tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "m.js").write_text('const { execSync } = require("node:child_process");\n\n'
+                               'async function tick() {\n  execSync("x");\n}\n')
+    srv.audit_map(str(repo))
+    prof = tmp_path / "recorded-elsewhere.json"  # speedscope: 300 ms inside tick, between idle samples
+    prof.write_text(json.dumps({
+        "shared": {"frames": [{"name": "tick", "file": str(repo / "m.js"), "line": 3}, {"name": "execSync"}]},
+        "profiles": [{"type": "sampled", "name": "main", "unit": "milliseconds", "startValue": 0,
+                      "samples": [[]] + [[0, 1]] * 30 + [[]], "weights": [10] * 32}]}))
+    r = srv.audit_trace_import(str(repo), profiles=[str(prof)])
+    assert r["imported"]["profiles"] == 1
+    [f] = [x for x in r["findings"] if x["rule"] == "blocking-in-async"]
+    assert f["evidence"]["status"] == "confirmed" and "execSync (sampled leaf)" in f["evidence"]["detail"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    assert "expected a V8 .cpuprofile" in srv.audit_trace_import(str(repo), profiles=[str(bad)])["error"]
 
 
 def test_round_loop_over_mcp(srv, tmp_path):

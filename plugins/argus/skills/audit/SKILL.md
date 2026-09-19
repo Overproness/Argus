@@ -35,10 +35,14 @@ This step works in any language. If the user gave a workload after `--`, or the
 repo has an obvious test suite and the user agrees, run
 `trace "<repo>" [--otlp] [--heartbeat REGEX] -- <command>`:
 - Python 3.12+ is traced automatically.
+- Node (JavaScript, TypeScript) is profiled automatically: stalls with stacks
+  and exact call counts.
 - Other languages send OpenTelemetry spans with `--otlp` when instrumented
   (the Java agent, .NET automatic instrumentation, the Node `--require`
   hook, or an SDK already in the code).
 - Any program that prints periodically gets stalls from `--heartbeat`.
+- A profile recorded elsewhere (V8 `.cpuprofile`, or speedscope JSON from
+  py-spy, rbspy or dotnet-trace) comes in with `trace-import --profile`.
 
 The `audit-trace` skill has the per-language setup. Do not add instrumentation
 to the repo without consent.

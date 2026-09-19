@@ -104,12 +104,27 @@ class IoRec:
     error: bool
 
 
+@dataclass(frozen=True)
+class CountRec:
+    """An exact call count for one repo function (from coverage), where activations are only sampled."""
+    file: str
+    line: int
+    qualname: str
+    count: int
+    source: str
+
+    @property
+    def key(self) -> tuple[str, int]:
+        return self.file, self.line
+
+
 @dataclass
 class Trace:
     runs: list[dict[str, str]]
     calls: list[CallRec]
     stalls: list[StallRec]
     io: list[IoRec] = field(default_factory=list)
+    counts: list[CountRec] = field(default_factory=list)
 
     def by_key(self) -> dict[tuple[str, int], list[CallRec]]:
         out: dict[tuple[str, int], list[CallRec]] = {}

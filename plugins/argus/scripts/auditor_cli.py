@@ -4,9 +4,10 @@
   auditor_cli.py map   <repo> [--out DIR] [--include-tests] [--no-scip]
   auditor_cli.py index <repo> [--out DIR] [--only rust-analyzer,scip-python,...]
   auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] [--assume ARG=N]
-                              [--otlp] [--heartbeat REGEX] -- <command...>
-  auditor_cli.py trace-import <repo> --otlp-file spans.json [--assume ARG=N]
-  auditor_cli.py trace-report <repo> [--out DIR] [--assume ARG=N]
+                              [--otlp] [--heartbeat REGEX] [--node | --no-node] -- <command...>
+  auditor_cli.py trace-import <repo> [--otlp-file spans.json] [--profile x.cpuprofile|x.speedscope.json]
+                                     [--coverage v8-coverage-dir] [--stall-ms 100] [--assume ARG=N]
+  auditor_cli.py trace-report <repo> [--out DIR] [--stall-ms 100] [--assume ARG=N]
   auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600]
   auditor_cli.py queue <repo> [--budget 10] [--per-round 5] [--max-rounds 3] [--rule R] [--dry-run]
   auditor_cli.py record <repo> (--file verdicts.json | -)
@@ -42,7 +43,8 @@ def main() -> int:
     tp = sub.add_parser("trace", help="run a command under the runtime tracer, then report")
     tp.add_argument("repo", type=Path)
     tp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
-    tp.add_argument("--stall-ms", type=float, default=100, help="self-slice length that counts as a stall")
+    stall_help = "how long the loop must be blocked to count as a stall"
+    tp.add_argument("--stall-ms", type=float, default=100, help=stall_help)
     tp.add_argument("--no-shapes", action="store_true", help="do not record argument sizes")
     assume_help = "project cost at this input size: ARG=N, FUNCTION=N, FUNCTION.ARG=N or *=N (repeatable)"
     tp.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
@@ -50,16 +52,26 @@ def main() -> int:
                     help="receive OpenTelemetry spans from the program (any language; sets OTEL_EXPORTER_OTLP_*)")
     tp.add_argument("--heartbeat", metavar="REGEX",
                     help="timestamp output lines matching REGEX; long gaps between them are stalls (any language)")
+    tp.add_argument("--node", action="store_true",
+                    help="V8 sampling profile + exact call counts for Node processes (on automatically for "
+                         "node/npm/npx/yarn/pnpm/tsx/ts-node commands)")
+    tp.add_argument("--no-node", action="store_true", help="do not profile Node processes")
     tp.add_argument("command", nargs="*", help="command to run, after --")
-    ti = sub.add_parser("trace-import", help="import OpenTelemetry spans recorded elsewhere (OTLP JSON/protobuf files)")
+    ti = sub.add_parser("trace-import", help="import runtime data recorded elsewhere: spans, profiles, coverage")
     ti.add_argument("repo", type=Path)
     ti.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
-    ti.add_argument("--otlp-file", type=Path, action="append", required=True,
+    ti.add_argument("--otlp-file", type=Path, action="append", default=[],
                     help="collector file-exporter output, an OTLP JSON document, or raw OTLP protobuf (repeatable)")
+    ti.add_argument("--profile", type=Path, action="append", default=[],
+                    help="a V8 .cpuprofile or a speedscope JSON (py-spy, rbspy, dotnet-trace, ...) (repeatable)")
+    ti.add_argument("--coverage", type=Path, action="append", default=[],
+                    help="V8 coverage JSON (a NODE_V8_COVERAGE file or directory) for exact call counts (repeatable)")
+    ti.add_argument("--stall-ms", type=float, default=100, help=stall_help + " (profiles are read with it)")
     ti.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
     rp = sub.add_parser("trace-report", help="rebuild trace.json/trace.md from recorded traces")
     rp.add_argument("repo", type=Path)
     rp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    rp.add_argument("--stall-ms", type=float, default=100, help=stall_help + " (profiles are read with it)")
     rp.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
     pp = sub.add_parser("repro", help="run reproduction tests under <out>/repros and collect evidence")
     pp.add_argument("repo", type=Path)
@@ -128,7 +140,7 @@ def main() -> int:
     out_dir = (args.out or repo / ".audit").resolve()
 
     if args.cmd in ("trace", "trace-report", "trace-import"):
-        from auditor.trace import otlp, spans, store
+        from auditor.trace import sources, spans
         from auditor.trace import run as trace_run
         trace_dir = out_dir / "trace"
         map_path = out_dir / "map.json"
@@ -146,24 +158,32 @@ def main() -> int:
                 if methods:
                     os.environ["OTEL_INSTRUMENTATION_METHODS_INCLUDE"] = methods
                     print(f"otlp: Java agent method spans for {methods.count('[')} class(es) from the map")
+            node = (args.node or trace_run.is_node_command(command)) and not args.no_node
+            if node:
+                print("node: sampling profile (--cpu-prof) and exact call counts (NODE_V8_COVERAGE) on")
             rc = trace_run.run(repo, trace_dir, command, args.stall_ms, not args.no_shapes,
-                               otlp=args.otlp, heartbeat=args.heartbeat)
+                               otlp=args.otlp, heartbeat=args.heartbeat, node=node)
             print(f"command exited {rc}")
         if args.cmd == "trace-import":
-            import time as _time
-            n = 0
-            for i, f in enumerate(args.otlp_file):
-                got = otlp.load_file(f)
-                otlp.write_jsonl(got, trace_dir / f"import-{int(_time.time())}-{i}.spans.jsonl",
-                                 {"argv": [f"imported from {f.name}"]})
-                n += len(got)
-            print(f"imported {n} span(s) from {len(args.otlp_file)} file(s)")
-        t = spans.attach(store.load(trace_dir), trace_dir, json.loads(map_path.read_text(encoding="utf8")), repo)
-        if not (t.calls or t.stalls or t.io):
-            print(f"no trace data under {trace_dir}. Python programs need 3.12+; for other languages run with "
-                  f"--otlp (an OpenTelemetry-instrumented program) and/or --heartbeat REGEX", file=sys.stderr)
+            if not (args.otlp_file or args.profile or args.coverage):
+                print("trace-import: pass --otlp-file, --profile and/or --coverage", file=sys.stderr)
+                return 1
+            try:
+                got = sources.import_files(trace_dir, args.otlp_file, args.profile, args.coverage)
+            except ValueError as e:
+                print(f"trace-import: {e}", file=sys.stderr)
+                return 1
+            print(f"imported {got['spans']} span(s), {got['profiles']} profile(s), "
+                  f"{got['coverage_files']} coverage file(s)")
+        map_data = json.loads(map_path.read_text(encoding="utf8"))
+        t = sources.collect(trace_dir, map_data, repo, args.stall_ms / 1000)
+        if not (t.calls or t.stalls or t.io or t.counts):
+            print(f"no trace data under {trace_dir}. Python programs need 3.12+; Node is profiled automatically; "
+                  f"other languages need --otlp (an OpenTelemetry-instrumented program), --heartbeat REGEX, or an "
+                  f"imported profile (trace-import --profile)", file=sys.stderr)
             return 1
-        print(f"{len(t.runs)} run(s), {len(t.calls)} calls, {len(t.io)} external calls, {len(t.stalls)} stalls")
+        print(f"{len(t.runs)} run(s), {len(t.calls)} calls, {len(t.io)} external calls, {len(t.stalls)} stalls, "
+              f"{len(t.counts)} exact call counts")
         from auditor.trace import evidence
         try:
             scale = {k.strip(): float(v) for k, v in (a.split("=", 1) for a in args.assume)}

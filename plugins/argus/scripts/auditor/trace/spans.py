@@ -30,6 +30,8 @@ from .store import CallRec, IoRec, StallRec, Trace
 PID_BASE = 1_000_000_000  # pseudo process ids for span sessions, clear of real pids
 SIZE_ATTR = re.compile(r"(?i)(count|size|length|rows|items|batch)")
 COVER = 0.8  # a span explains a gap when it overlaps at least this share of it
+DEPENDENCY_DIR = re.compile(r"/(node_modules|site-packages|dist-packages|vendor|\.cargo/registry|pkg/mod|\.m2|"
+                            r"\.gradle|\.nuget|bower_components)/")
 
 
 def _norm(q: str) -> str:
@@ -65,10 +67,13 @@ class Mapper:
 
     def rel(self, path: str) -> str | None:
         p = str(path).replace("\\", "/")
-        if p.lower().startswith(self.repo):
+        inside = p.lower().startswith(self.repo)
+        if inside:
             p = p[len(self.repo):]
         if p in self.by_file:
             return p
+        if inside or DEPENDENCY_DIR.search("/" + p):
+            return None  # an exact path that is not a mapped file: node_modules/x/index.js is not ./index.js
         best = None
         for f in self.by_file:  # longest suffix match: builds often run from another checkout
             if p.endswith("/" + f) and (best is None or len(f) > len(best)):
@@ -285,4 +290,4 @@ def attach(trace: Trace, trace_dir: Path, map_data: dict, repo: Path) -> Trace:
                 label = best.label if best is not None else "no span covered the gap"
                 stalls.append(StallRec(0, 0, "", 0, f"(program-level: {label})", excess / 1e9, b / 1e9, []))
 
-    return Trace(runs, calls, stalls, io)
+    return Trace(runs, calls, stalls, io, list(trace.counts))

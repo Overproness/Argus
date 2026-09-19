@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Argus MCP server: audit_map, audit_trace and run_repro over stdio.
+"""Argus MCP server: map, trace, reproduce and orchestrate an audit over stdio.
 
 Thin wrappers over the same functions the CLI calls, so any MCP client
 (Claude Code, Codex, Cursor, a CI job) can drive the audit without the skills.
@@ -44,38 +44,71 @@ def audit_map(repo: str, include_tests: bool = False, out: str | None = None, ma
             "findings": data["findings"][:max_findings], "hotspots": data["hotspots"][:10]}
 
 
-@server.tool()
-def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bool = True,
-                out: str | None = None, assume: dict[str, float] | None = None, otlp: bool = False,
-                heartbeat: str | None = None) -> dict:
-    """Run `command` (argv list) under runtime observation and join the evidence to map.json. Writes .audit/trace.{json,md}.
+def _evidence(root: Path, out_dir: Path, stall_ms: float, assume: dict | None, extra: dict) -> dict:
+    """Join everything under .audit/trace/ to map.json and summarize it for the caller."""
+    from auditor.trace import evidence, sources
 
-    Python 3.12+ programs are traced function by function automatically. Any language: `otlp=True` receives
-    OpenTelemetry spans (the program must be instrumented: Java/.NET agent, Node/Python/Go/... SDK), and
-    `heartbeat` (a regex for the program's periodic output lines) turns gaps between them into stalls.
-    `assume` projects super-linear functions to input sizes you expect in production, e.g. {"rows": 50000}.
-    """
-    from auditor.trace import evidence, spans, store
-    from auditor.trace import run as trace_run
-
-    root = Path(repo).resolve()
-    out_dir = _out(root, out)
     map_path = out_dir / "map.json"
-    if not map_path.exists():
-        return {"error": f"{map_path} missing; call audit_map first"}
-    rc = trace_run.run(root, out_dir / "trace", command, stall_ms, shapes, otlp=otlp, heartbeat=heartbeat)
-    t = spans.attach(store.load(out_dir / "trace"), out_dir / "trace",
-                     json.loads(map_path.read_text(encoding="utf8")), root)
-    if not (t.calls or t.stalls or t.io):
-        return {"error": "no trace data recorded: Python programs need 3.12+; other languages need otlp=True with "
-                         "an OpenTelemetry-instrumented program and/or a heartbeat regex", "exit_code": rc}
+    t = sources.collect(out_dir / "trace", json.loads(map_path.read_text(encoding="utf8")), root, stall_ms / 1000)
+    if not (t.calls or t.stalls or t.io or t.counts):
+        return {**extra, "error": "no trace data recorded: Python programs need 3.12+ and Node is profiled "
+                                  "automatically; other languages need otlp=True with an OpenTelemetry-instrumented "
+                                  "program, a heartbeat regex, or an imported profile (audit_trace_import)"}
     jp, mp = evidence.write(map_path, t, out_dir, assume)
     data = json.loads(jp.read_text(encoding="utf8"))
-    return {"exit_code": rc, "trace_json": str(jp), "trace_md": str(mp), "summary": data["summary"],
+    return {**extra, "trace_json": str(jp), "trace_md": str(mp), "summary": data["summary"],
             "findings": [{k: f[k] for k in ("rule", "severity", "function", "file", "line")} | {"evidence": f["evidence"]}
                          for f in data["findings"]],
             "unpredicted_stalls": data["unpredicted_stalls"], "complexity": data["complexity"],
             "projections": data["projections"], "external_calls": data["external_calls"]}
+
+
+@server.tool()
+def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bool = True,
+                out: str | None = None, assume: dict[str, float] | None = None, otlp: bool = False,
+                heartbeat: str | None = None, node: bool | None = None) -> dict:
+    """Run `command` (argv list) under runtime observation and join the evidence to map.json. Writes .audit/trace.{json,md}.
+
+    Python 3.12+ programs are traced function by function automatically, and so are Node programs (a V8
+    sampling profile plus exact call counts; `node` defaults to on for node/npm/npx/yarn/pnpm/tsx commands).
+    Any language: `otlp=True` receives OpenTelemetry spans (the program must be instrumented: Java/.NET agent,
+    Node/Python/Go/... SDK), and `heartbeat` (a regex for the program's periodic output lines) turns gaps
+    between them into stalls. Runs accumulate in .audit/trace/; delete it to start over.
+    `assume` projects super-linear functions to input sizes you expect in production, e.g. {"rows": 50000}.
+    """
+    from auditor.trace import run as trace_run
+
+    root = Path(repo).resolve()
+    out_dir = _out(root, out)
+    if not (out_dir / "map.json").exists():
+        return {"error": f"{out_dir / 'map.json'} missing; call audit_map first"}
+    use_node = trace_run.is_node_command(command) if node is None else node
+    rc = trace_run.run(root, out_dir / "trace", command, stall_ms, shapes, otlp=otlp, heartbeat=heartbeat,
+                       node=use_node)
+    return _evidence(root, out_dir, stall_ms, assume, {"exit_code": rc})
+
+
+@server.tool()
+def audit_trace_import(repo: str, otlp_files: list[str] | None = None, profiles: list[str] | None = None,
+                       coverage: list[str] | None = None, stall_ms: float = 100, out: str | None = None,
+                       assume: dict[str, float] | None = None) -> dict:
+    """Import runtime data recorded elsewhere, then rebuild .audit/trace.{json,md} like audit_trace.
+
+    otlp_files: collector file-exporter output, OTLP JSON or protobuf. profiles: a V8 .cpuprofile (Node, Deno,
+    Chrome DevTools) or speedscope JSON (py-spy, rbspy, dotnet-trace, ...). coverage: V8 coverage JSON files
+    or directories (NODE_V8_COVERAGE) for exact call counts.
+    """
+    from auditor.trace import sources
+
+    root = Path(repo).resolve()
+    out_dir = _out(root, out)
+    if not (out_dir / "map.json").exists():
+        return {"error": f"{out_dir / 'map.json'} missing; call audit_map first"}
+    try:
+        got = sources.import_files(out_dir / "trace", otlp_files or [], profiles or [], coverage or [])
+    except (ValueError, OSError) as e:
+        return {"error": str(e)}
+    return _evidence(root, out_dir, stall_ms, assume, {"imported": got})
 
 
 @server.tool()

@@ -197,7 +197,8 @@ def test_cli_heartbeat_on_a_node_program(tmp_path):
         "setTimeout(() => crunch(600), 150);\n"
         "setTimeout(() => clearInterval(t), 1200);\n")
     subprocess.run(CLI + ["map", str(repo)], check=True, capture_output=True)
-    r = subprocess.run(CLI + ["trace", str(repo), "--heartbeat", "^tick", "--", "node", "loop.mjs"],
+    # The heartbeat channel on its own (test_profiles covers it next to Node's profiler).
+    r = subprocess.run(CLI + ["trace", str(repo), "--heartbeat", "^tick", "--no-node", "--", "node", "loop.mjs"],
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
     data = json.loads((repo / ".audit" / "trace.json").read_text())
@@ -234,18 +235,27 @@ def test_cli_otlp_with_node_auto_instrumentation(tmp_path):
     (repo / "app.cjs").write_text(NODE_APP)
     subprocess.run(CLI + ["map", str(repo)], check=True, capture_output=True)
     srv = FaultServer(body="ok", latency=0.1).start()
-    try:
+
+    def trace(*flags):
+        shutil.rmtree(repo / ".audit" / "trace", ignore_errors=True)  # runs accumulate; compare them one by one
         env = {**os.environ, "OTEL_NODE_ENABLED_INSTRUMENTATIONS": "http"}
-        r = subprocess.run(CLI + ["trace", str(repo), "--otlp", "--", "node", "--require", str(NODE_REGISTER),
+        r = subprocess.run(CLI + ["trace", str(repo), "--otlp", *flags, "--", "node", "--require", str(NODE_REGISTER),
                                   "app.cjs", srv.url + "/quote"], env=env, capture_output=True, text=True, timeout=300)
+        assert r.returncode == 0, r.stdout + r.stderr
+        data = json.loads((repo / ".audit" / "trace.json").read_text())
+        [ext] = data["external_calls"]  # the exporter's chunked uploads were decoded
+        assert ext["count"] == 3 and ext["target"].endswith("/quote") and ext["p50_s"] >= 0.1
+        return {(f["rule"], f["function"]): f["evidence"] for f in data["findings"]}
+
+    try:
+        # Auto-instrumentation makes no spans for the repo's own functions: say so instead of "never ran".
+        assert {e["status"] for e in trace("--no-node").values()} == {"not-traced"}
+        # With Node's profiler on as well (the default), the same run has function-level evidence.
+        ev = trace()
+        assert ev[("io-in-loop", "app.main")]["status"] == "confirmed"
+        assert "not-traced" not in {e["status"] for e in ev.values()}
     finally:
         srv.stop()
-    assert r.returncode == 0, r.stdout + r.stderr
-    data = json.loads((repo / ".audit" / "trace.json").read_text())
-    [ext] = data["external_calls"]  # the exporter's chunked uploads were decoded
-    assert ext["count"] == 3 and ext["target"].endswith("/quote") and ext["p50_s"] >= 0.1
-    # Auto-instrumentation makes no spans for the repo's own functions: say so instead of "never ran".
-    assert {f["evidence"]["status"] for f in data["findings"]} == {"not-traced"}
 
 
 JAVA_MAIN = """package demo;

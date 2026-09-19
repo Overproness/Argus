@@ -8,6 +8,9 @@ Every other language is observed through two language-neutral channels:
              SDK or agent in the program at it (spans -> *.spans.jsonl)
   heartbeat  the program's own periodic output lines, timestamped as they
              arrive (-> *.heartbeat.jsonl); gaps are stalls
+and, where the runtime has them built in, native function-level channels:
+  node       V8 sampling profiles and exact call counts via NODE_OPTIONS and
+             NODE_V8_COVERAGE (-> node-prof/, node-cov/); see profiles.py
 Native adapters for other languages read the same AUDIT_TRACE_* variables.
 """
 from __future__ import annotations
@@ -21,6 +24,7 @@ import threading
 import time
 from pathlib import Path
 
+from ..procs import resolve
 from . import otlp as otlp_mod
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[2]
@@ -62,11 +66,35 @@ def _run_teed(cmd: list[str], cwd: Path, env: dict, log: Path, meta: dict) -> in
     return rc
 
 
+NODE_COMMANDS = {"node", "npm", "npx", "yarn", "pnpm", "tsx", "ts-node"}
+
+
+def is_node_command(cmd: list[str]) -> bool:
+    return bool(cmd) and Path(cmd[0]).stem.lower() in NODE_COMMANDS
+
+
+def node_env(env: dict, trace_dir: Path, run_id: str, cmd: list[str]) -> dict:
+    """Sampling profile (--cpu-prof) and exact call counts (NODE_V8_COVERAGE) for every Node process started.
+    Each run gets its own directories, so profiles keep their own command and clock when runs accumulate."""
+    prof, cov = trace_dir / "node-prof" / run_id, trace_dir / "node-cov" / run_id
+    prof.mkdir(parents=True, exist_ok=True)
+    cov.mkdir(parents=True, exist_ok=True)
+    flags = f'--cpu-prof --cpu-prof-dir="{prof.as_posix()}" --cpu-prof-interval=500'
+    env["NODE_OPTIONS"] = f"{env.get('NODE_OPTIONS', '')} {flags}".strip()
+    env["NODE_V8_COVERAGE"] = str(cov)
+    # V8 stamps profiles with the clock perf_counter reads; this pair puts them on the epoch clock.
+    meta = {"argv": cmd, "epoch_ns": time.time_ns(), "mono_ns": time.perf_counter_ns()}
+    (prof / "_argus_meta.json").write_text(json.dumps(meta), encoding="utf8")
+    return env
+
+
 def run(repo: Path, trace_dir: Path, cmd: list[str], stall_ms: float, shapes: bool,
-        otlp: bool = False, heartbeat: str | None = None) -> int:
+        otlp: bool = False, heartbeat: str | None = None, node: bool = False) -> int:
     trace_dir.mkdir(parents=True, exist_ok=True)
     env = trace_env(repo, trace_dir, stall_ms, shapes)
-    stamp = f"{int(time.time())}-{os.getpid()}"
+    stamp = f"{time.time_ns() // 1_000_000}-{os.getpid()}"  # one server process may trace twice in a second
+    if node:
+        env = node_env(env, trace_dir, stamp, cmd)
     receiver = None
     if otlp:
         receiver = otlp_mod.Receiver().start()
@@ -77,9 +105,9 @@ def run(repo: Path, trace_dir: Path, cmd: list[str], stall_ms: float, shapes: bo
     try:
         if heartbeat:
             meta = {"regex": heartbeat, "argv": cmd, "stall_ms": stall_ms}
-            rc = _run_teed(cmd, repo, env, trace_dir / f"{stamp}.heartbeat.jsonl", meta)
+            rc = _run_teed(resolve(cmd), repo, env, trace_dir / f"{stamp}.heartbeat.jsonl", meta)
         else:
-            rc = subprocess.call(cmd, cwd=repo, env=env)
+            rc = subprocess.call(resolve(cmd), cwd=repo, env=env)
     finally:
         if receiver is not None:
             time.sleep(0.5)  # batch exporters flush at exit; give the last request time to land

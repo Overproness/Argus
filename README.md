@@ -8,9 +8,13 @@ A static audit map for 12 languages (Rust, Python, JavaScript/TypeScript, Go,
 Java, Kotlin, Scala, C#, Swift, C, C++, Ruby, PHP), plus runtime observation
 that turns the map's findings into evidence in any language:
 - a built-in function tracer for Python;
+- Node's own profiler for JavaScript and TypeScript (a V8 sampling profile plus
+  exact call counts from V8 coverage), switched on automatically;
 - an OpenTelemetry receiver for everything instrumented (the Java or .NET
   agent, or any SDK);
-- heartbeat stalls for any program that prints.
+- heartbeat stalls for any program that prints;
+- profiles recorded elsewhere: V8 `.cpuprofile`, or speedscope JSON from
+  py-spy, rbspy or dotnet-trace.
 
 It produces:
 
@@ -65,10 +69,14 @@ python plugins/argus/scripts/auditor_cli.py map path/to/repo  # -> path/to/repo/
 python plugins/argus/scripts/auditor_cli.py index path/to/repo  # optional: SCIP indexes for precise calls
 python plugins/argus/scripts/auditor_cli.py trace path/to/repo -- python -m pytest tests
 #   -> path/to/repo/.audit/trace.{json,md}; Python 3.12+ is traced function by function
+python plugins/argus/scripts/auditor_cli.py trace path/to/repo -- npm test
+#   Node: sampling profile + exact call counts, on automatically for node/npm/npx/yarn/pnpm/tsx
 python plugins/argus/scripts/auditor_cli.py trace path/to/repo --otlp --heartbeat "tick" -- java -javaagent:otel.jar -jar app.jar
 #   any language: OpenTelemetry spans + stalls from gaps between "tick" lines
 python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --otlp-file collector-dump.json
+python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --profile py-spy.speedscope.json
 python plugins/argus/scripts/auditor_cli.py trace-report path/to/repo --assume rows=50000  # rebuild, project sizes
+#   runs accumulate in .audit/trace/; delete it to start over
 python plugins/argus/scripts/auditor_cli.py repro path/to/repo   # run .audit/repros/test_*.py -> .audit/repro.{json,md}
 python plugins/argus/scripts/auditor_cli.py queue path/to/repo --budget 10 --per-round 5 --max-rounds 3
 python plugins/argus/scripts/auditor_cli.py record path/to/repo --file verdicts.json   # or --file - for stdin
@@ -83,7 +91,7 @@ claude --plugin-dir plugins/argus
 #   /Argus:audit-trace path/to/repo -- <command>        runtime evidence
 #   /Argus:audit-investigate path/to/repo               one round of reproductions via the Argus:investigator agent
 #   MCP tools (any client, see plugins/argus/.mcp.json):
-#     audit_map, audit_trace, run_repro, audit_queue, audit_record, audit_report
+#     audit_map, audit_trace, audit_trace_import, run_repro, audit_queue, audit_record, audit_report
 
 # Install it through this marketplace (inside Claude Code)
 /plugin marketplace add <path or git URL of this repo>
@@ -103,10 +111,13 @@ Layout of `plugins/argus/scripts/auditor/`:
 | `report.py` | `map.json` and `map.md` output |
 | `trace/store.py` | SQLite trace store: one file per traced process, merged on read |
 | `trace/py/tracer.py` | Python tracer (`sys.monitoring`): per-call timing in slices, self time, event-loop stalls, argument sizes |
-| `trace/run.py` | Runs a command with tracers attached through `AUDIT_TRACE_*` environment variables, an OTLP receiver (`--otlp`) and heartbeat capture (`--heartbeat`) |
+| `trace/run.py` | Runs a command with tracers attached through `AUDIT_TRACE_*` environment variables, Node's profiler and coverage (`NODE_OPTIONS`, `NODE_V8_COVERAGE`), an OTLP receiver (`--otlp`) and heartbeat capture (`--heartbeat`) |
 | `trace/otlp.py` | OpenTelemetry in, from any language: OTLP/HTTP receiver (protobuf and JSON, gzip) and file importer |
 | `trace/spans.py` | Spans mapped to map functions; client spans as observed external calls; heartbeat gaps as stalls attributed to the deepest covering span |
+| `trace/profiles.py` | Sampling profiles (V8 `.cpuprofile`, speedscope) as activations and loop stalls with stacks; V8 coverage as exact call counts; profile clocks aligned with spans and heartbeats |
+| `trace/sources.py` | Everything under `.audit/trace/` as one trace, and imports of spans, profiles and coverage recorded elsewhere |
 | `protowire.py` | Minimal protobuf wire reader shared by the SCIP and OTLP decoders (no protobuf dependency) |
+| `procs.py` | Finds programs the way a shell would, so `npm`, `mvn`, `gradle` and other `.cmd`/`.bat` shims run on Windows |
 | `trace/fit.py` | Complexity fitting: (input size, duration) samples to O(n^k) |
 | `trace/evidence.py` | Joins traces to `map.json`; writes `trace.json` and `trace.md` |
 | `repro/harness.py` | Reproduction helpers: `latency`, `hang`, `fail_connect`, `count_connects`, `refuse_remote`, `loop_monitor`, `call_with_deadline`, `scaling`, `count_calls`; each emits `@@evidence` lines |
@@ -116,7 +127,7 @@ Layout of `plugins/argus/scripts/auditor/`:
 | `orchestrate.py` | The round loop: ranked, budgeted queue with follow-ups and suppression; verdict ledger checked against repro results; final report data |
 | `report_html.py` | `report.json`, `report.md` and a self-contained, theme-aware `report.html` (publishable as a claude.ai artifact) |
 | `../hooks/guard.py` | PreToolUse guard: blocks live exchange hosts, credentials and destructive commands in audit runs and reproduction files |
-| `../mcp_server.py` | MCP server exposing `audit_map`, `audit_trace`, `run_repro`, `audit_queue`, `audit_record`, `audit_report` over stdio |
+| `../mcp_server.py` | MCP server exposing `audit_map`, `audit_trace`, `audit_trace_import`, `run_repro`, `audit_queue`, `audit_record`, `audit_report` over stdio |
 
 Plugin components outside `scripts/`: `skills/audit`, `skills/audit-map`, `skills/audit-trace`,
 `skills/audit-investigate`, `agents/investigator.md`, `hooks/hooks.json`, `.mcp.json`.

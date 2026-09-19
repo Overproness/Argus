@@ -56,8 +56,20 @@ class Evidence:
         lang_of = {(f["id"].rsplit(":", 2)[0], int(f["id"].rsplit(":", 2)[1])): f.get("lang")
                    for f in map_data["functions"]}
         self.function_level_langs = {lang_of.get(c.key) for c in trace.calls if c.file} - {None}
+        self.function_level_langs |= {lang_of.get(c.key) for c in trace.counts} - {None}
         if any((r.get("source") or "python-tracer") == "python-tracer" for r in trace.runs):
             self.function_level_langs.add("python")
+        # Sampling profilers give approximate activations (never used to count calls); coverage gives exact counts.
+        self.sampled_pids = {int(r["pid"]) for r in trace.runs if r.get("sampled") == "1" and r.get("pid")}
+        # Runs that could not see stalls (a profile without idle samples, evented profiles).
+        self.stall_blind_pids = {int(r["pid"]) for r in trace.runs if r.get("stalls") == "0" and r.get("pid")}
+        self.counts: dict[Key, int] = defaultdict(int)
+        for c in trace.counts:
+            self.counts[c.key] += c.count
+
+    def _sampled(self, key: Key) -> bool:
+        calls = self.calls_by_key.get(key, [])
+        return bool(calls) and all(c.pid in self.sampled_pids for c in calls)
 
     def _owner_key(self, pid: int, call_id: int) -> Key | None:
         """The repo function a call belongs to: itself if mapped, else its nearest mapped ancestor."""
@@ -107,12 +119,19 @@ class Evidence:
 
     def stats(self, key: Key) -> dict | None:
         calls = self.calls_by_key.get(key)
+        exact = self.counts.get(key)
         if not calls:
-            return None
+            if not exact:
+                return None
+            # Ran (the coverage count says so) but never long enough to appear in a sample.
+            return {"calls": exact, "calls_exact": True, "sampled": True, "total_s": 0.0, "self_s": 0.0,
+                    "p50_s": 0.0, "p95_s": 0.0, "max_s": 0.0, "max_self_slice_s": 0.0,
+                    "stalls": len(self.stalls_by_leaf.get(key, [])), "is_coro": False}
         durs = sorted(c.dur for c in calls)
         p95 = quantiles(durs, n=20)[-1] if len(durs) >= 2 else durs[-1]
-        return {
-            "calls": len(calls),
+        sampled = self._sampled(key)
+        out = {
+            "calls": exact if exact else len(calls),
             "total_s": round(sum(durs), 4),
             "self_s": round(sum(c.self_dur for c in calls), 4),
             "p50_s": round(median(durs), 4),
@@ -122,6 +141,10 @@ class Evidence:
             "stalls": len(self.stalls_by_leaf.get(key, [])),
             "is_coro": calls[0].is_coro,
         }
+        if sampled:
+            out["sampled"] = True  # durations are sample-based; `calls` is exact only with coverage
+            out["calls_exact"] = bool(exact)
+        return out
 
     # --- per-finding rules --------------------------------------------------
     def for_finding(self, f: dict) -> dict:
@@ -146,6 +169,11 @@ class Evidence:
                 return {"status": "confirmed", "stats": st,
                         "detail": f"{len(hits)} stall(s) on the predicted stack, worst {_fmt(worst.dur)}: "
                                   + " → ".join(q for _, _, q in worst.stack)}
+            ran = self.calls_by_key.get(fkey, [])
+            if ran and all(c.pid in self.stall_blind_pids for c in ran):
+                return {"status": "not-verifiable", "stats": st,
+                        "detail": "it ran only in profiles that cannot show stalls (no idle samples to tell a "
+                                  "blocked loop from ordinary work); record with idle samples or trace it natively"}
             leaf_st = self.stats(leaf) or st
             return {"status": "not-observed", "stats": st,
                     "detail": f"ran {leaf_st['calls']}×, longest uninterrupted slice "
@@ -154,7 +182,7 @@ class Evidence:
 
         if rule == "io-in-loop":
             if not chain or leaf == fkey:
-                per_io = [self._io_under(c) for c in self.calls_by_key[fkey]]
+                per_io = [self._io_under(c) for c in self.calls_by_key.get(fkey, [])]
                 if any(per_io):
                     mx = max(len(x) for x in per_io)
                     targets = sorted({r.target for x in per_io for r in x})
@@ -166,9 +194,20 @@ class Evidence:
                 return {"status": "not-verifiable", "stats": st,
                         "detail": f"direct library call; this run recorded no client spans for it (use --otlp with "
                                   f"an instrumented client). {st['calls']} activation(s), max {_fmt(st['max_s'])}"}
+            leaf_name = self.qualname_by_key.get(leaf, "?")
+            if self._sampled(fkey) or fkey not in self.calls_by_key:
+                # Sampled activations cannot count calls; exact counts can give the fan-out as a ratio.
+                n_f, n_leaf = self.counts.get(fkey), self.counts.get(leaf)
+                if not (n_f and n_leaf):
+                    return {"status": "not-verifiable", "stats": st,
+                            "detail": "sampled profile without call counts; add coverage (trace --node records it)"}
+                ratio = n_leaf / n_f
+                return {"status": "confirmed" if ratio > 1 else "not-observed", "stats": st,
+                        "detail": f"call counts: `{leaf_name}` ran {n_leaf}× while `{f['function']}` ran {n_f}× "
+                                  f"({ratio:.1f} per call" + (" if all calls come from here)" if ratio > 1 else ")")
+                                  + ("; cost grows with the collection" if ratio > 1 else "")}
             per = [self._descendants_named(c, leaf) for c in self.calls_by_key[fkey]]
             mx = max(per)
-            leaf_name = self.qualname_by_key.get(leaf, "?")
             if mx > 1:
                 return {"status": "confirmed", "stats": st,
                         "detail": f"`{leaf_name}` ran up to {mx}× per activation of `{f['function']}` "
@@ -177,6 +216,10 @@ class Evidence:
                     "detail": f"`{leaf_name}` ran at most once per activation ({len(per)} activations)"}
 
         if rule == "nested-loops":
+            if self._sampled(fkey) or fkey not in self.calls_by_key:
+                return {"status": "not-verifiable", "stats": st,
+                        "detail": f"sampled profile: no input sizes to fit a curve; ran {st['calls']}×, "
+                                  f"{_fmt(st['max_s'])} longest sampled stretch"}
             fit = best_fit(self.calls_by_key[fkey])
             if fit:
                 return {"status": "measured", "stats": st, "fit": fit.__dict__,
@@ -187,13 +230,16 @@ class Evidence:
                               "sizes (need ≥4 spanning 10×) to fit a curve"}
 
         if rule == "recursion":
+            if self._sampled(fkey) or fkey not in self.calls_by_key:
+                return {"status": "not-verifiable", "stats": st,
+                        "detail": f"sampled profile: recursion depth is not observable; ran {st['calls']}×"}
             depth = self._recursion_depth(fkey)
             return {"status": "measured", "stats": st, "depth": depth,
                     "detail": f"max observed recursion depth {depth}"}
 
         hits = [s for s in self.trace.stalls if fkey in {(a, b) for a, b, _ in s.stack}]
         extra = f"; {len(hits)} stall(s) passed through this function" if hits else ""
-        io = [r for c in self.calls_by_key[fkey] for r in self._io_under(c)]
+        io = [r for c in self.calls_by_key.get(fkey, []) for r in self._io_under(c)]
         out = {"status": "not-verifiable", "stats": st,
                "detail": f"tracing cannot decide `{rule}`; ran {st['calls']}×, max {_fmt(st['max_s'])}{extra}"}
         if io:
@@ -339,7 +385,8 @@ class Evidence:
                           "python": r.get("python"), "source": r.get("source", "python-tracer"),
                           "service": r.get("service")} for r in self.trace.runs],
                 "calls": len(self.trace.calls), "stalls": len(self.trace.stalls), "io": len(self.trace.io),
-                "mapped_functions_exercised": sum(1 for k in self.qualname_by_key if k in self.calls_by_key),
+                "mapped_functions_exercised": sum(1 for k in self.qualname_by_key
+                                                  if k in self.calls_by_key or self.counts.get(k)),
                 "mapped_functions": len(self.qualname_by_key),
             },
             "summary": dict(status),
