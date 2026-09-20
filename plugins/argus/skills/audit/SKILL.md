@@ -60,7 +60,7 @@ Repeat:
    the first round only; later rounds reuse the stored budget. If the output
    starts with `stop:`, go to step 4.
 2. Read `.audit/queue.json`. For each entry in `items`, launch the
-   `Argus:investigator` agent with a self-contained prompt containing:
+   `argus:investigator` agent with a self-contained prompt containing:
    - the repo path;
    - the plugin root;
    - the item JSON, verbatim.

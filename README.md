@@ -76,6 +76,7 @@ python plugins/argus/scripts/auditor_cli.py trace path/to/repo --otlp --heartbea
 python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --otlp-file collector-dump.json
 python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --profile py-spy.speedscope.json
 python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --chrome trace-1234.json   # Rust tracing-chrome
+python plugins/argus/scripts/auditor_cli.py lint-import path/to/repo --sarif ruff.sarif   # linter results as evidence
 python plugins/argus/scripts/auditor_cli.py trace-report path/to/repo --assume rows=50000  # rebuild, project sizes
 #   runs accumulate in .audit/trace/; delete it to start over
 python plugins/argus/scripts/auditor_cli.py repro path/to/repo   # run .audit/repros/test_*.py -> .audit/repro.{json,md}
@@ -87,10 +88,10 @@ python plugins/argus/scripts/auditor_cli.py probe path/to/repo --lang rust --nam
 
 # Try the plugin without installing it
 claude --plugin-dir plugins/argus
-#   /Argus:audit path/to/repo --budget 10 [-- <workload>]   everything, in budgeted rounds, ending in the report
-#   /Argus:audit-map path/to/repo                       static map + triage
-#   /Argus:audit-trace path/to/repo -- <command>        runtime evidence
-#   /Argus:audit-investigate path/to/repo               one round of reproductions via the Argus:investigator agent
+#   /argus:audit path/to/repo --budget 10 [-- <workload>]   everything, in budgeted rounds, ending in the report
+#   /argus:audit-map path/to/repo                       static map + triage
+#   /argus:audit-trace path/to/repo -- <command>        runtime evidence
+#   /argus:audit-investigate path/to/repo               one round of reproductions via the argus:investigator agent
 #   MCP tools (any client, see plugins/argus/.mcp.json):
 #     audit_map, audit_trace, audit_trace_import, run_repro, audit_queue, audit_record, audit_report
 

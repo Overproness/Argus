@@ -1,5 +1,5 @@
 {
-  "name": "Argus",
+  "name": "argus",
   "version": "0.2.0",
   "description": "Agentic auditor: maps call graphs and I/O boundaries, finds blocking-in-async, missing timeouts, I/O in loops and other extreme-case risks, then traces the program at runtime to turn findings into evidence.",
   "keywords": ["audit", "performance", "rust", "python", "async", "static-analysis", "tracing"],

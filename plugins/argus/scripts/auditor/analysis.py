@@ -345,6 +345,15 @@ class RepoMap:
                     "Candidate for complexity fitting with large inputs (M2).",
                 ))
 
+        for fn in fns.values():
+            if fn.is_async and fn.max_loop_depth >= 2 and not any(c.awaited and c.loop_depth for c in fn.calls):
+                F.append(self._finding(
+                    "cpu-heavy-in-async", "low", "heuristic", fn, fn.line,
+                    f"Async function with loops nested {fn.max_loop_depth} deep and no await inside them. CPU-bound "
+                    "work like this holds the event loop or runtime thread until it finishes. Offload it to a worker "
+                    "pool or thread, or yield periodically. Runtime tracing shows how long it really runs.",
+                ))
+
         for scc in self._sccs():
             first = fns[scc[0]]
             F.append(self._finding(

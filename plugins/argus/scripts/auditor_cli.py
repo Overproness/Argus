@@ -7,6 +7,7 @@
                               [--otlp] [--heartbeat REGEX] [--node | --no-node] -- <command...>
   auditor_cli.py trace-import <repo> [--otlp-file spans.json] [--profile x.cpuprofile|x.speedscope.json] [--chrome trace.json]
                                      [--coverage v8-coverage-dir] [--stall-ms 100] [--assume ARG=N]
+  auditor_cli.py lint-import <repo> [--sarif FILE ...] [--run [ruff,golangci-lint,semgrep]]
   auditor_cli.py trace-report <repo> [--out DIR] [--stall-ms 100] [--assume ARG=N]
   auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600]
   auditor_cli.py queue <repo> [--budget 10] [--per-round 5] [--max-rounds 3] [--rule R] [--dry-run]
@@ -70,6 +71,13 @@ def main() -> int:
                     help="V8 coverage JSON (a NODE_V8_COVERAGE file or directory) for exact call counts (repeatable)")
     ti.add_argument("--stall-ms", type=float, default=100, help=stall_help + " (profiles are read with it)")
     ti.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
+    lp = sub.add_parser("lint-import", help="import linter results (SARIF) as evidence for map findings")
+    lp.add_argument("repo", type=Path)
+    lp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    lp.add_argument("--sarif", type=Path, action="append", default=[], help="SARIF file (repeatable)")
+    lp.add_argument("--run", nargs="?", const="", metavar="NAMES", help="also run installed linters (ruff, "
+                    "golangci-lint, semgrep) and read their SARIF; optional comma-separated subset")
+    lp.add_argument("--semgrep-config", help="semgrep rules to use with --run (path or registry pack)")
     rp = sub.add_parser("trace-report", help="rebuild trace.json/trace.md from recorded traces")
     rp.add_argument("repo", type=Path)
     rp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
@@ -195,6 +203,31 @@ def main() -> int:
         jp, mp_ = evidence.write(map_path, t, out_dir, scale)
         data = json.loads(jp.read_text(encoding="utf8"))
         print("evidence: " + ", ".join(f"{v} {k}" for k, v in sorted(data["summary"].items())))
+        print(f"wrote {jp}\nwrote {mp_}")
+        return 0
+
+    if args.cmd == "lint-import":
+        from auditor import linters
+        map_path = out_dir / "map.json"
+        if not map_path.exists():
+            print(f"no {map_path}; run `map` first", file=sys.stderr)
+            return 1
+        files = [p.resolve() for p in args.sarif]
+        if args.run is not None:
+            for name, status in linters.run_linters(repo, out_dir, [n for n in args.run.split(",") if n] or None,
+                                                    args.semgrep_config):
+                print(f"{name}: {status}")
+            files += sorted((out_dir / "lint").glob("*.sarif"))
+        if not files:
+            print("lint-import: pass --sarif FILE and/or --run", file=sys.stderr)
+            return 1
+        try:
+            jp, mp_, data = linters.write(repo, out_dir, files)
+        except (ValueError, OSError, json.JSONDecodeError) as e:
+            print(f"lint-import: {e}", file=sys.stderr)
+            return 1
+        t = data["totals"]
+        print(f"{t['results']} result(s): {t['corroborated_findings']} map finding(s) corroborated, {t['leads']} other lead(s)")
         print(f"wrote {jp}\nwrote {mp_}")
         return 0
 

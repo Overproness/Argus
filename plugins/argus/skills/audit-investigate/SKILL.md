@@ -34,7 +34,7 @@ Read `.audit/queue.json` and tell the user what was skipped and why.
 
 ## 2. Run investigators
 
-For each item, launch the `Argus:investigator` agent with a self-contained
+For each item, launch the `argus:investigator` agent with a self-contained
 prompt containing:
 - the repo path;
 - the plugin root;

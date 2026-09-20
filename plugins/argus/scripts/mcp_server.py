@@ -12,6 +12,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import bootstrap  # noqa: E402
+
+bootstrap.ensure_dependencies()  # a plain `python3` may lack tree-sitter and mcp: use (or build) a private venv
+
 from mcp.server.mcpserver import MCPServer  # noqa: E402
 
 server = MCPServer(
@@ -110,6 +114,33 @@ def audit_trace_import(repo: str, otlp_files: list[str] | None = None, profiles:
     except (ValueError, OSError) as e:
         return {"error": str(e)}
     return _evidence(root, out_dir, stall_ms, assume, {"imported": got})
+
+
+@server.tool()
+def audit_lint_import(repo: str, sarif_files: list[str] | None = None, run: bool = False,
+                      out: str | None = None) -> dict:
+    """Import linter results (SARIF: ruff, clippy-sarif, golangci-lint, eslint, semgrep, ...) and join them to map.json.
+
+    A result that means the same as a map finding on the same function corroborates it; the rest are leads.
+    run=True also runs the installed linters Argus knows (ruff, golangci-lint). Writes .audit/lint.{json,md}.
+    """
+    from auditor import linters
+
+    root = Path(repo).resolve()
+    out_dir = _out(root, out)
+    if not (out_dir / "map.json").exists():
+        return {"error": f"{out_dir / 'map.json'} missing; call audit_map first"}
+    files = [Path(f).resolve() for f in sarif_files or []]
+    ran = linters.run_linters(root, out_dir) if run else []
+    files += sorted((out_dir / "lint").glob("*.sarif")) if run else []
+    if not files:
+        return {"error": "no SARIF: pass sarif_files or run=True with a linter installed", "ran": ran}
+    try:
+        jp, mp, data = linters.write(root, out_dir, files)
+    except (ValueError, OSError, json.JSONDecodeError) as e:
+        return {"error": str(e)}
+    return {"lint_json": str(jp), "lint_md": str(mp), "ran": ran, **data["totals"],
+            "corroborated": data["corroborated"], "leads": data["leads"][:30]}
 
 
 @server.tool()

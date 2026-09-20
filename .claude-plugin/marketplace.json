@@ -1,5 +1,5 @@
 {
-  "name": "Argus",
+  "name": "argus",
   "owner": {
     "name": "CODEFORGE AI Team",
     "email" : "info@thecodeforge.dev"
@@ -7,7 +7,7 @@
   "description": "Agentic workflows for auditing and simulating codebases.",
   "plugins": [
     {
-      "name": "Argus",
+      "name": "argus",
       "source": "./plugins/argus",
       "description": "Agentic auditor for extreme cases and composition bugs."
     }

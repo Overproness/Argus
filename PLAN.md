@@ -167,7 +167,10 @@ C and C++ programs were run for scaling.
       - .NET: verify dotnet-trace's speedscope export;
       - Ruby: verify rbspy;
       - Swift, C, C++: perf or samply.
-- **P3 Linter evidence**: a SARIF importer plus a runner table (clippy via
+- **P3 Linter evidence**: ✅ SARIF importer (`lint-import`, MCP `audit_lint_import`, results placed in map
+  functions, corroborating equivalent map findings; tested on synthetic SARIF) and a runner for ruff,
+  golangci-lint and semgrep (unverified: none installed here). Open: runners for the rest, verifying real
+  linter output. Original scope: a SARIF importer plus a runner table (clippy via
   clippy-sarif, ruff, golangci-lint, eslint, detekt, Roslyn analyzers, semgrep,
   PMD/SpotBugs, RuboCop, PHPStan, SwiftLint). Imported results confirm or
   contradict map findings.
@@ -523,20 +526,15 @@ what the agents decide.
   - ✅ retry without backoff, unbounded retries, retry amplification (M4);
   - ✅ `unwrap`/`expect` on network and DB results (M4). Open: panics on parsed
     external data (JSON fields, index access);
-  - retries without jitter, and non-idempotent retries (POST without an
-    idempotency key);
-  - retry libraries configured by call rather than decorator (tokio-retry,
-    `backoff::retry`, retry-go, Polly, p-retry);
-  - unbounded channels and queues;
-  - sequential awaits that could run concurrently;
-  - spawns never joined;
-  - floats for money;
-  - `SystemTime` used for intervals;
-  - regexes with catastrophic backtracking;
-  - loading all rows without pagination;
-  - CPU-heavy work on an async path (busy loops, large sorts or parses inside
-    async functions). The Node profiler finds these only as unpredicted stalls
-    today.
+  - ✅ (heuristic, source patterns in `langs/patterns.py`, tested on Rust and
+    Python): backoff without jitter, unbounded channels and queues, sequential
+    awaits, spawns never joined, floats for money, `SystemTime`/wall clock used for
+    intervals, regexes with nested repeats, loading all rows, panics on parsed
+    data (Rust, Go, Swift, Kotlin), CPU-heavy work on an async path (nested loops
+    with no await). Open: non-idempotent retries (POST without an idempotency
+    key); retry libraries configured by call (tokio-retry, `backoff::retry`,
+    retry-go, Polly, p-retry); per-language tuning of the patterns on real code
+    (false-positive rate unmeasured).
 - **Evaluation:** a corpus of real repositories per language with known bugs as
   ground truth. Measure recall and false-positive rate per language and per
   capability on each milestone. Any user repo (a trading bot with the sync API
