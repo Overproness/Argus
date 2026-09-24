@@ -65,7 +65,7 @@ def test_map_trace_repro_chain(srv):
     m = srv.audit_map(str(FIX))
     assert m["stats"]["findings"] >= 5 and (FIX / ".audit" / "map.json").exists()
     t = srv.audit_trace(str(FIX), [sys.executable, "run.py"])
-    assert t["summary"].get("confirmed", 0) >= 3
+    assert t["evidence_summary"].get("confirmed", 0) >= 3
     shutil.copytree(FIX / "repros", FIX / ".audit" / "repros")
     r = srv.run_repro(str(FIX))
-    assert {x["outcome"] for x in r["tests"]} == {"passed"}
+    assert r["tests"] == [] and r["by_outcome"] == {"passed": r["by_outcome"]["passed"]} and r["by_outcome"]["passed"] > 0

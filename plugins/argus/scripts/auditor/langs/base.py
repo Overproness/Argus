@@ -159,7 +159,6 @@ def split_top(s: str, sep: str = ",") -> list[str]:
 def expand_braced(spec: str, sep: str, prefix: str = "", alias_kw: str = "as") -> list[tuple[str, str]]:
     """`a::{b, c::{self, D as E}}` -> [(b, a.b), (c, a.c), (E, a.c.D)] (always dotted output)."""
     spec = re.sub(rf"\s+{alias_kw}\s+", "@", spec.strip())
-    spec = re.sub(r"=>", "@", spec)  # scala: {A => B}
     spec = re.sub(r"\s+", "", spec)
     if spec.endswith("}") and "{" in spec:
         i = spec.index("{")

@@ -1,4 +1,6 @@
 .audit/
+.audit-eval/
 __pycache__/
 .pytest_cache/
 target/
+tests/eval/.cache/

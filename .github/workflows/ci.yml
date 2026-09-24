@@ -2,9 +2,13 @@ name: ci
 on:
   push: {branches: [main]}
   pull_request:
+  schedule:
+    - cron: "17 4 * * *"  # nightly: the eval job below, which clones real repos and is too slow for every push
+  workflow_dispatch:
 
 jobs:
   core:
+    if: github.event_name != 'schedule'  # the nightly trigger is for the eval job only
     name: core (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -20,32 +24,27 @@ jobs:
         with: {node-version: "22"}
       - uses: actions/setup-java@v4
         with: {distribution: temurin, java-version: "21"}
-      - uses: actions/setup-dotnet@v4
-        with: {dotnet-version: "8.0.x"}
       - uses: dtolnay/rust-toolchain@stable
         with: {components: "rust-analyzer, clippy"}
       - uses: actions/setup-go@v5
         with: {go-version: stable}
+      - run: npm install -g tsx
       - run: pip install -r plugins/argus/requirements.txt
       - run: python -m pytest tests -q -rs
 
-  # One job per remaining toolchain: its fixtures run only when the toolchain is present, so a green job
-  # here is what turns a language's matrix cell from "implemented" into "verified".
-  toolchains:
-    name: toolchain (${{ matrix.lang }})
+  # Ground-truth recall/false-positive check (PLAN.md's evaluation corpus). Runs nightly and on demand,
+  # not on every push: `kind: git` cases clone a real repository, which is slow and needs steady network
+  # (this repo's own dev sandbox found large downloads flaky; a hosted runner should not have that problem).
+  eval:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: evaluation corpus
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {lang: ruby, setup: "ruby/setup-ruby@v1", with: "{\"ruby-version\": \"3.3\"}"}
-          - {lang: php, setup: "shivammathur/setup-php@v2", with: "{\"php-version\": \"8.3\"}"}
-          - {lang: kotlin, setup: "actions/setup-java@v4", with: "{\"distribution\": \"temurin\", \"java-version\": \"21\"}"}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
-      - uses: ${{ matrix.setup }}
-        with: ${{ fromJSON(matrix.with) }}
-      - run: pip install -r plugins/argus/requirements.txt
-      - run: python -m pytest tests -q -rs -k "${{ matrix.lang }}"
+      - run: pip install -r plugins/argus/requirements.txt -r tests/eval/requirements.txt
+      - run: python tests/eval/run.py --json eval-summary.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: {name: eval-summary, path: eval-summary.json}

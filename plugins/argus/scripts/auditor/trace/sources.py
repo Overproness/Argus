@@ -34,7 +34,7 @@ def profile_kind(path: Path) -> str:
     if isinstance(doc, dict) and "profiles" in doc and ("shared" in doc or "speedscope" in str(doc.get("$schema"))):
         return "speedscope"
     raise ValueError(f"{path}: expected a V8 .cpuprofile or a speedscope JSON file "
-                     "(py-spy/rbspy --format speedscope, dotnet-trace convert --format Speedscope)")
+                     "(py-spy --format speedscope --idle)")
 
 
 def import_files(trace_dir: Path, otlp_files=(), profile_files=(), coverage=(), chrome_files=()) -> dict[str, int]:

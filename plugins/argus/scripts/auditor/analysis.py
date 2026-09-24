@@ -24,8 +24,7 @@ SKIP_DIRS = {
 }
 TEST_DIRS = {"test", "tests", "__tests__", "spec", "specs", "testdata", "fixtures", "e2e", "benches"}
 TEST_FILE = re.compile(
-    r"(^test_.*\.py$|_test\.(py|go|rb|exs?)$|\.(test|spec)\.[cm]?[jt]sx?$|Tests?\.(java|kt|cs|swift|scala)$|"
-    r"_spec\.rb$|Test\.php$)"
+    r"(^test_.*\.py$|_test\.(py|go)$|\.(test|spec)\.[cm]?[jt]sx?$|Tests?\.java$)"
 )
 GENERATED = re.compile(r"\.(min|bundle|pb|g|generated|designer)\.\w+$|_pb2(_grpc)?\.py$")
 MAX_FILE_BYTES = 2_000_000
@@ -37,7 +36,7 @@ DOWNGRADE = {"high": "medium", "medium": "low", "low": "low", "info": "info"}
 CONF_RANK = {"scip": 0, "exact": 0, "unique": 1, "heuristic": 1, "name": 2}
 # Short local syscalls block briefly; network, sleeps, processes and waits can block for seconds.
 BLOCK_SEVERITY = {FS: "medium"}
-FAMILY = {"typescript": "javascript", "cpp": "c", "kotlin": "jvm", "java": "jvm", "scala": "jvm"}
+FAMILY = {"typescript": "javascript", "cpp": "c", "java": "jvm"}
 SPEC_BY_NAME = {s.name: s for s in SPECS}
 SCOPE_SELF = {"Self", "self", "static", "parent", "this"}
 

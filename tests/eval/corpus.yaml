@@ -1,0 +1,68 @@
+# Ground-truth cases for measuring Argus's recall and false-positive rate (PLAN.md, Evaluation corpus).
+#
+# Two kinds of entry:
+#   local  a fixture already in this repo (tests/fixtures/...). Fast, offline, always available; used to
+#          keep the harness itself honest and to seed the corpus before real-world cases are collected.
+#   git    a real repository at a specific commit, with the file/function/rule Argus should find there.
+#          This is the kind that actually answers "is Argus good on real code" -- add these as you find
+#          them. `commit` is the commit BEFORE the fix, i.e. the one that still has the bug.
+#
+# `expected`: findings Argus's static map must produce. A hit needs rule + function + file to match; `line`
+# is optional and only checked when given (numbers drift as a file changes, function identity doesn't).
+# `must_be_absent`: specific (rule, function) pairs that must NOT appear -- a targeted false-positive check
+# for cases where a naive version of a rule would misfire (offloaded calls, configured timeouts, etc.).
+#
+# Run: python tests/eval/run.py
+
+cases:
+  - id: rust_trader-blocking-http
+    kind: local
+    path: tests/fixtures/rust_trader
+    lang: rust
+    note: >-
+      Synthetic (not mined from a real repo's history -- see the note in run.py about why real `git` cases
+      aren't populated yet). A synchronous reqwest::blocking call reachable from an async path: the exact
+      shape of the bug this project exists for.
+    expected:
+      - {rule: blocking-in-async, function: "rust_trader::main", file: src/main.rs, line: 15}
+      - {rule: blocking-in-async, function: "rust_trader::strategy::run_strategy", file: src/strategy.rs, line: 20}
+      - {rule: io-in-loop, function: "rust_trader::market_data::refresh_all", file: src/market_data.rs, line: 20}
+      - {rule: recursion, function: "rust_trader::risk::exposure", file: src/risk.rs, line: 6}
+      - {rule: nested-loops, function: "rust_trader::risk::correlation_matrix", file: src/risk.rs, line: 14}
+
+  - id: py_runtime-nplusone-and-timeout
+    kind: local
+    path: tests/fixtures/py_runtime
+    lang: python
+    note: Synthetic. An N+1 fetch inside a loop and a call with no timeout, both in the same function.
+    expected:
+      - {rule: io-in-loop, function: "app.service.tick", file: app/service.py, line: 30}
+      - {rule: io-without-timeout, function: "app.service.fetch_quote", file: app/service.py, line: 9}
+    must_be_absent:
+      # fetch_quote_bounded passes timeout=3: must not also be flagged
+      - {rule: io-without-timeout, function: "app.service.fetch_quote_bounded"}
+
+  - id: rust_runtime-verified-against-a-real-trace
+    kind: local
+    path: tests/fixtures/rust_runtime
+    lang: rust
+    note: >-
+      The same static shape as rust_trader, but this one was also verified against a REAL `tracing-chrome`
+      recording of the compiled, running binary (see test_trace_chrome_real.py), not just the static rule.
+      Kept separate so the static and runtime sides of that case are each scored on their own.
+    expected:
+      - {rule: blocking-in-async, function: "rust_runtime::strategy::tick", file: src/strategy.rs, line: 13}
+      - {rule: blocking-in-async, function: "rust_runtime::strategy::refresh_all", file: src/strategy.rs, line: 26}
+      - {rule: io-in-loop, function: "rust_runtime::strategy::refresh_all", file: src/strategy.rs, line: 26}
+
+  # Add real cases like this once a real bug has been found and the exact function name/file checked by
+  # actually running `auditor_cli.py map` against that commit:
+  # - id: <short-slug>
+  #   kind: git
+  #   repo: https://github.com/<org>/<repo>
+  #   commit: <sha before the fix -- the one with the bug>
+  #   fix_commit: <sha of the fix, documentation only, not used by the harness>
+  #   lang: <language>
+  #   note: <one line: what the fix commit's message/diff says, and a link if useful>
+  #   expected:
+  #     - {rule: ..., function: ..., file: ..., line: ...}

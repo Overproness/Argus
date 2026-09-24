@@ -29,9 +29,48 @@ def _out(repo: Path, out: str | None) -> Path:
     return Path(out).resolve() if out else repo / ".audit"
 
 
+# Every tool writes its full result to a file under .audit/ regardless of what it returns here. By default
+# the return value is a summary (counts, the most severe items, trimmed text) plus that file's path, not the
+# whole thing: on a large repo the full findings list is thousands of tokens the caller usually doesn't need
+# in context, and can read on disk (or ask again with full=True) when it does.
+PREVIEW = 10
+MSG_LIMIT = 240
+
+
+def _brief(f: dict) -> dict:
+    d = {k: f[k] for k in ("rule", "severity", "function", "file", "line") if k in f}
+    if "message" in f:
+        d["message"] = f["message"][:MSG_LIMIT] + ("…" if len(f["message"]) > MSG_LIMIT else "")
+    if f.get("evidence"):
+        d["evidence"] = {k: f["evidence"][k] for k in ("status", "detail") if k in f["evidence"]}
+    return d
+
+
+def _counts(items: list[dict], key: str) -> dict:
+    out: dict = {}
+    for it in items:
+        out[it.get(key, "?")] = out.get(it.get(key, "?"), 0) + 1
+    return out
+
+
+def _summarize(findings: list[dict], full: bool) -> dict:
+    """counts by rule/severity always; the findings list itself only inline when small or asked for."""
+    by_severity = _counts(findings, "severity")
+    ordered = sorted(findings, key=lambda f: {"high": 0, "medium": 1, "low": 2, "info": 3}.get(f.get("severity"), 4))
+    shown = ordered if (full or len(findings) <= PREVIEW) else ordered[:PREVIEW]
+    return {"finding_count": len(findings), "by_severity": by_severity, "by_rule": _counts(findings, "rule"),
+            "findings": [_brief(f) for f in shown],
+            "note": None if full or len(findings) <= PREVIEW else
+            f"{len(findings) - PREVIEW} more not shown; pass full=true or read the file for all of them"}
+
+
 @server.tool()
-def audit_map(repo: str, include_tests: bool = False, out: str | None = None, max_findings: int = 50) -> dict:
-    """Build the static audit map: call graph, I/O boundaries, findings, hotspots. Writes .audit/map.{json,md}."""
+def audit_map(repo: str, include_tests: bool = False, out: str | None = None, full: bool = False) -> dict:
+    """Build the static audit map: call graph, I/O boundaries, findings, hotspots. Writes .audit/map.{json,md}.
+
+    Returns a summary (counts plus the most severe findings, up to 10) by default. Pass full=True for every
+    finding inline instead of reading map_json; use that when you need to see all of them in one call.
+    """
     from auditor import report
     from auditor.analysis import RepoMap
     from auditor import scip
@@ -45,10 +84,10 @@ def audit_map(repo: str, include_tests: bool = False, out: str | None = None, ma
     jp, mp = report.write(m, out_dir)
     data = json.loads(jp.read_text(encoding="utf8"))
     return {"map_json": str(jp), "map_md": str(mp), "stats": data["stats"],
-            "findings": data["findings"][:max_findings], "hotspots": data["hotspots"][:10]}
+            "hotspots": data["hotspots"][:PREVIEW], **_summarize(data["findings"], full)}
 
 
-def _evidence(root: Path, out_dir: Path, stall_ms: float, assume: dict | None, extra: dict) -> dict:
+def _evidence(root: Path, out_dir: Path, stall_ms: float, assume: dict | None, extra: dict, full: bool = False) -> dict:
     """Join everything under .audit/trace/ to map.json and summarize it for the caller."""
     from auditor.trace import evidence, sources
 
@@ -60,17 +99,20 @@ def _evidence(root: Path, out_dir: Path, stall_ms: float, assume: dict | None, e
                                   "program, a heartbeat regex, or an imported profile (audit_trace_import)"}
     jp, mp = evidence.write(map_path, t, out_dir, assume)
     data = json.loads(jp.read_text(encoding="utf8"))
-    return {**extra, "trace_json": str(jp), "trace_md": str(mp), "summary": data["summary"],
-            "findings": [{k: f[k] for k in ("rule", "severity", "function", "file", "line")} | {"evidence": f["evidence"]}
-                         for f in data["findings"]],
-            "unpredicted_stalls": data["unpredicted_stalls"], "complexity": data["complexity"],
-            "projections": data["projections"], "external_calls": data["external_calls"]}
+    findings = [{k: f[k] for k in ("rule", "severity", "function", "file", "line")} | {"evidence": f["evidence"]}
+               for f in data["findings"]]
+    return {**extra, "trace_json": str(jp), "trace_md": str(mp), "evidence_summary": data["summary"],
+            **_summarize(findings, full),
+            "unpredicted_stalls": data["unpredicted_stalls"][:PREVIEW],
+            "complexity": data["complexity"][:PREVIEW],
+            "projections": data["projections"][:PREVIEW],
+            "external_calls": data["external_calls"][:PREVIEW]}
 
 
 @server.tool()
 def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bool = True,
                 out: str | None = None, assume: dict[str, float] | None = None, otlp: bool = False,
-                heartbeat: str | None = None, node: bool | None = None) -> dict:
+                heartbeat: str | None = None, node: bool | None = None, full: bool = False) -> dict:
     """Run `command` (argv list) under runtime observation and join the evidence to map.json. Writes .audit/trace.{json,md}.
 
     Python 3.12+ programs are traced function by function automatically, and so are Node programs (a V8
@@ -79,6 +121,7 @@ def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bo
     Node/Python/Go/... SDK), and `heartbeat` (a regex for the program's periodic output lines) turns gaps
     between them into stalls. Runs accumulate in .audit/trace/; delete it to start over.
     `assume` projects super-linear functions to input sizes you expect in production, e.g. {"rows": 50000}.
+    Returns a summary by default (as audit_map does); pass full=True for every finding inline.
     """
     from auditor.trace import run as trace_run
 
@@ -89,19 +132,21 @@ def audit_trace(repo: str, command: list[str], stall_ms: float = 100, shapes: bo
     use_node = trace_run.is_node_command(command) if node is None else node
     rc = trace_run.run(root, out_dir / "trace", command, stall_ms, shapes, otlp=otlp, heartbeat=heartbeat,
                        node=use_node)
-    return _evidence(root, out_dir, stall_ms, assume, {"exit_code": rc})
+    return _evidence(root, out_dir, stall_ms, assume, {"exit_code": rc}, full)
 
 
 @server.tool()
 def audit_trace_import(repo: str, otlp_files: list[str] | None = None, profiles: list[str] | None = None,
                        coverage: list[str] | None = None, chrome_traces: list[str] | None = None,
-                       stall_ms: float = 100, out: str | None = None, assume: dict[str, float] | None = None) -> dict:
+                       stall_ms: float = 100, out: str | None = None, assume: dict[str, float] | None = None,
+                       full: bool = False) -> dict:
     """Import runtime data recorded elsewhere, then rebuild .audit/trace.{json,md} like audit_trace.
 
     otlp_files: collector file-exporter output, OTLP JSON or protobuf. profiles: a V8 .cpuprofile (Node, Deno,
-    Chrome DevTools) or speedscope JSON (py-spy, rbspy, dotnet-trace, ...). coverage: V8 coverage JSON files
+    Chrome DevTools) or speedscope JSON (py-spy, ...). coverage: V8 coverage JSON files
     or directories (NODE_V8_COVERAGE) for exact call counts. chrome_traces: Chrome trace-event JSON, e.g.
-    Rust tracing-chrome output (one slice per poll of an instrumented span).
+    Rust tracing-chrome output (one slice per poll of an instrumented span). Returns a summary by default;
+    pass full=True for every finding inline.
     """
     from auditor.trace import sources
 
@@ -113,7 +158,7 @@ def audit_trace_import(repo: str, otlp_files: list[str] | None = None, profiles:
         got = sources.import_files(out_dir / "trace", otlp_files or [], profiles or [], coverage or [], chrome_traces or [])
     except (ValueError, OSError) as e:
         return {"error": str(e)}
-    return _evidence(root, out_dir, stall_ms, assume, {"imported": got})
+    return _evidence(root, out_dir, stall_ms, assume, {"imported": got}, full)
 
 
 @server.tool()
@@ -140,19 +185,27 @@ def audit_lint_import(repo: str, sarif_files: list[str] | None = None, run: bool
     except (ValueError, OSError, json.JSONDecodeError) as e:
         return {"error": str(e)}
     return {"lint_json": str(jp), "lint_md": str(mp), "ran": ran, **data["totals"],
-            "corroborated": data["corroborated"], "leads": data["leads"][:30]}
+            "corroborated": data["corroborated"][:PREVIEW], "leads": data["leads"][:PREVIEW]}
 
 
 @server.tool()
 def run_repro(repo: str, file: str | None = None, timeout: int = 600, out: str | None = None) -> dict:
-    """Run reproduction tests under .audit/repros (or one file) and collect outcomes and evidence. Writes .audit/repro.{json,md}."""
+    """Run reproduction tests under .audit/repros (or one file) and collect outcomes and evidence. Writes .audit/repro.{json,md}.
+
+    Returns counts by outcome, plus every test that did not pass (passing tests are in repro_json if you need
+    them, but "it passed" rarely needs a second look).
+    """
     from auditor.repro import runner
 
     root = Path(repo).resolve()
     out_dir = _out(root, out)
     res = runner.run(root, out_dir, Path(file).resolve() if file else None, timeout)
     jp, mp = runner.write(res, out_dir)
-    return {"repro_json": str(jp), "repro_md": str(mp), "exit_code": res["exit_code"], "tests": res["tests"],
+    by_outcome = _counts(res["tests"], "outcome")
+    not_passed = [t for t in res["tests"] if t["outcome"] != "passed"]
+    return {"repro_json": str(jp), "repro_md": str(mp), "exit_code": res["exit_code"], "by_outcome": by_outcome,
+            "tests": not_passed[:PREVIEW],
+            "note": None if len(not_passed) <= PREVIEW else f"{len(not_passed) - PREVIEW} more not shown; read {jp}",
             "output_tail": res["output_tail"] if res["exit_code"] not in (0, 1) else ""}
 
 

@@ -38,11 +38,10 @@ repo has an obvious test suite and the user agrees, run
 - Node (JavaScript, TypeScript) is profiled automatically: stalls with stacks
   and exact call counts.
 - Other languages send OpenTelemetry spans with `--otlp` when instrumented
-  (the Java agent, .NET automatic instrumentation, the Node `--require`
-  hook, or an SDK already in the code).
+  (the Java agent, the Node `--require` hook, or an SDK already in the code).
 - Any program that prints periodically gets stalls from `--heartbeat`.
 - A profile recorded elsewhere (V8 `.cpuprofile`, or speedscope JSON from
-  py-spy, rbspy or dotnet-trace) comes in with `trace-import --profile`.
+  py-spy, or a Rust tracing-chrome trace) comes in with `trace-import`.
 
 The `audit-trace` skill has the per-language setup. Do not add instrumentation
 to the repo without consent.
@@ -84,9 +83,9 @@ Between rounds the queue does the following on its own:
 - It queues findings in every language. Each item's `harness` field tells the
   investigator how to reproduce it:
   - Python in-process;
-  - native probe or black-box: Rust, JavaScript, Java, C#, C, C++ (verified);
-  - native probe templates not yet verified on a toolchain, or black-box: Go,
-    TypeScript, Kotlin, Scala, Swift, Ruby, PHP.
+  - native probe or black-box: Rust, JavaScript, Java, C, C++ (verified);
+  - native probe or black-box: Go, TypeScript (not yet verified on this
+    toolchain).
 
   Investigators report `inconclusive` when the language's toolchain is not
   installed.

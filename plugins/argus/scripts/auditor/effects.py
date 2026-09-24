@@ -41,8 +41,6 @@ CRASH = {
              "If this {kind} call fails, `unwrap`/`expect` panics. In a tokio task the task dies, silently "
              "unless its JoinHandle is checked; on the main path the process exits. Timeouts, resets and 5xx "
              "responses are routine for remote calls, so handle the error or propagate it with `?`."),
-    "swift": (re.compile(r"\btry!"), "snippet", "panic-on-io-error",
-              "If this {kind} call fails, `try!` crashes the process. Handle the error with `try`/`catch`."),
     "go": (re.compile(r",\s*_\s*:?=|^\s*_\s*:?="), "snippet", "ignored-io-error",
            "The error of this {kind} call is discarded (`_`). On failure the result is nil or zero and the "
            "next use misbehaves or panics far from the cause."),
@@ -314,7 +312,7 @@ class Effects:
             for lp, att in self.retry_loops(fn):
                 layers_here.append(("loop", lp.line, att, "none" if lp.sleep_s is None else
                                     ("exponential" if lp.exponential else "fixed")))
-            if fn.retry and fn.lang in ("python", "java", "kotlin", "scala", "ruby"):
+            if fn.retry and fn.lang in ("python", "java"):
                 if self._io_in(fn, fn.line, fn.end_line):
                     layers_here.append(("decorator", fn.line, fn.retry[0], fn.retry[1]))
             for kind, line, att, backoff in layers_here:

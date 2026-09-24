@@ -1,0 +1,109 @@
+name: Argus audit
+description: >-
+  Static audit map (call graph, I/O boundaries, findings) for Rust, Python,
+  JavaScript/TypeScript, Go, Java and C/C++, optionally corroborated with
+  SARIF from installed linters. Uploads .audit/ as an artifact and writes a
+  job summary. This step is static analysis only and needs no AI credentials;
+  see README.md for the agentic workflow (runtime evidence, reproductions,
+  the full report) that a Claude Code / Agent SDK step can run on top of it.
+author: CODEFORGE AI Team
+branding:
+  icon: eye
+  color: purple
+
+inputs:
+  path:
+    description: Repository (or subdirectory) to audit.
+    required: false
+    default: "."
+  python-version:
+    description: Python version to run Argus itself under.
+    required: false
+    default: "3.12"
+  include-tests:
+    description: Also analyze test code.
+    required: false
+    default: "false"
+  run-linters:
+    description: >-
+      Also run installed linters (ruff, golangci-lint) and fold their SARIF
+      in as corroborating evidence. Linters must already be set up by an
+      earlier step; this does not install them.
+    required: false
+    default: "false"
+  fail-on:
+    description: >-
+      Fail this step if a finding at or above this severity exists
+      (high|medium|low|info). Empty (the default) never fails the step;
+      the job summary and artifact are the point of this action, not a gate.
+    required: false
+    default: ""
+  artifact-name:
+    description: Name for the uploaded .audit/ artifact. Empty skips the upload.
+    required: false
+    default: "argus-audit"
+
+outputs:
+  high:
+    description: Number of high-severity findings.
+    value: ${{ steps.map.outputs.high }}
+  medium:
+    description: Number of medium-severity findings.
+    value: ${{ steps.map.outputs.medium }}
+  low:
+    description: Number of low-severity findings.
+    value: ${{ steps.map.outputs.low }}
+  map-json:
+    description: Path to the written map.json.
+    value: ${{ steps.map.outputs.map_json }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install Argus
+      shell: bash
+      run: pip install -q -r "${{ github.action_path }}/plugins/argus/requirements.txt"
+
+    - name: Static map
+      id: map
+      shell: bash
+      run: |
+        set -e
+        cd "${{ inputs.path }}"
+        SCRIPTS="${{ github.action_path }}/plugins/argus/scripts"
+        args=(map . --out .audit)
+        if [ "${{ inputs.include-tests }}" = "true" ]; then args+=(--include-tests); fi
+        python3 "$SCRIPTS/auditor_cli.py" "${args[@]}"
+        python3 "$SCRIPTS/ci_helpers.py" outputs .audit/map.json
+
+    - name: Linter evidence
+      if: inputs.run-linters == 'true'
+      shell: bash
+      run: |
+        cd "${{ inputs.path }}"
+        python3 "${{ github.action_path }}/plugins/argus/scripts/auditor_cli.py" lint-import . --run || true
+
+    - name: Job summary
+      shell: bash
+      run: |
+        cd "${{ inputs.path }}"
+        { echo "## Argus audit"; echo; cat .audit/map.md; } >> "$GITHUB_STEP_SUMMARY"
+        if [ -f .audit/lint.md ]; then { echo; cat .audit/lint.md; } >> "$GITHUB_STEP_SUMMARY"; fi
+
+    - name: Check severity gate
+      if: inputs.fail-on != ''
+      shell: bash
+      run: |
+        cd "${{ inputs.path }}"
+        python3 "${{ github.action_path }}/plugins/argus/scripts/ci_helpers.py" gate .audit/map.json "${{ inputs.fail-on }}"
+
+    - uses: actions/upload-artifact@v4
+      if: inputs.artifact-name != ''
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.path }}/.audit/
+        if-no-files-found: warn

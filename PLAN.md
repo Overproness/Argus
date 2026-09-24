@@ -13,23 +13,35 @@ call inside an async trading loop took 30 s once and stalled everything.
 This workflow reverses that. **Fixed tools list every risky point in the code. The
 LLM only decides what to investigate. Every finding needs evidence.**
 
-**Scope: every programming language.** Argus is not built for one language or
-one kind of program. Every capability (the static map, effects, runtime
-evidence, reproduction, linter import) has to work for all supported languages.
-A capability that works in one language only is a gap, not a feature. See
-[Language parity](#language-parity).
+**Scope: Rust, Python, JavaScript/TypeScript, Go, Java, C/C++.** Argus targets
+these six languages, chosen to cover the shapes of the motivating bug (async
+runtimes, goroutines, JVM threads, native code) without spreading thin. Every
+capability (the static map, effects, runtime evidence, reproduction, linter
+import) has to work for all six. A capability that works in one language only
+is a gap, not a feature. See [Language parity](#language-parity).
+
+Argus previously also covered Kotlin, Scala, C#/.NET, Swift, Ruby and PHP.
+That support was removed to concentrate effort on the six languages above;
+see git history before this cut if it is ever needed again.
 
 ## Status
 
 | Milestone | State |
 |---|---|
 | M1: static map (Rust) | ✅ done |
-| M1.5: every major language + precise call resolution | ✅ done. 12 languages, SCIP import, checked against rattler (Rust, 457 files, 3 s) and sktime (Python, 1,111 files, 10 s) |
-| M2: runtime observation + fault injection | ✅ Python: tracer (`sys.monitoring`), SQLite store, stall detection, N+1 counts, complexity fitting, evidence report joined to the map, in-process fault injection, safety hook. Open: tracers for other languages, out-of-process fault injection, linter import |
-| M3: investigator agent + generated reproduction tests | ✅ Python in-process; every other language through M5 P1 (fault server plus black-box runs or native probes; Rust verified end to end with real investigator subagents). `investigator` subagent, `audit-investigate` skill, in-process reproduction harness (latency/hang injection, loop-lag monitor, deadlines, scaling fits, call counts), `repro` runner, PreToolUse safety guard, MCP server (`audit_map`, `audit_trace`, `run_repro`) |
-| M4: parallel investigators, passing effects in both directions, final report | ✅ Static effect engine for all 12 languages (waits, deadlines, retries, crash-on-error). Size projections from traces. Budgeted rounds with follow-ups and suppression. Verdict ledger checked against reproductions. `audit` skill, three new MCP tools, `report.html` |
-| M5: language parity: every capability in every language | in progress. ✅ P1 language-neutral reproduction (fault server, evidence protocol, native probes). ✅ P2a language-neutral runtime evidence (OpenTelemetry receiver and importer, span-to-function mapping, observed external calls, heartbeat stalls with attribution). P2b native tracers: ✅ Node (V8 profile + coverage, automatic), ✅ profile import (`.cpuprofile`, speedscope); Rust, Go, JVM, .NET open. Open: P3–P5; see [Language parity](#language-parity) |
+| M1.5: precise call resolution | ✅ done. 6 languages, SCIP import verified for real on all of them (rust-analyzer, scip-python, scip-typescript, scip-go; scip-java unverified in this environment), checked against rattler (Rust, 457 files, 3 s) and sktime (Python, 1,111 files, 10 s) |
+| M2: runtime observation + fault injection | ✅ Python: tracer (`sys.monitoring`), SQLite store, stall detection, N+1 counts, complexity fitting, evidence report joined to the map, in-process fault injection, safety hook. ✅ Rust: `tracing-chrome` import, verified against a real recording. Linter import (SARIF) done. Open: native tracers for Go/JVM/C++, out-of-process fault injection |
+| M3: investigator agent + generated reproduction tests | ✅ Python in-process; ✅ native probe or black-box verified for real for Rust, JavaScript, TypeScript, Java, Go, C, C++ (every language in scope). `investigator` subagent, `audit-investigate` skill, in-process reproduction harness (latency/hang injection, loop-lag monitor, deadlines, scaling fits, call counts), `repro` runner, PreToolUse safety guard, MCP server |
+| M4: parallel investigators, passing effects in both directions, final report | ✅ Static effect engine for all 6 languages (waits, deadlines, retries, crash-on-error). Size projections from traces. Budgeted rounds with follow-ups and suppression. Verdict ledger checked against reproductions. `audit` skill, MCP tools, `report.html` |
+| M5: language parity: every capability in every language | in progress, close to done for the 6-language scope. ✅ P1 native probes/black-box verified for all 6. ✅ P2a OpenTelemetry: real Python SDK, real Go SDK, real Node auto-instrumentation all verified; Java agent implemented, unverified here (large-file download unreliable in this sandbox; the code path is inert for non-Java repos, see below). ✅ P2b Node (automatic), Rust (`tracing-chrome`, real trace verified). ✅ P3 SARIF linter import. ✅ Packaging and cost controls (below). Evaluation harness built and tested, corpus seeded with local cases only. Open: P2b for Go/JVM/C++ native tracers, P5 CI (written, never run), real `git` corpus cases |
 | M6: deeper verification (deterministic simulation, performance fuzzing, invariant mining) | planned |
+
+**Java in a non-Java repo does nothing.** The OpenTelemetry Java agent
+auto-configuration (`OTEL_INSTRUMENTATION_METHODS_INCLUDE`) only activates
+when `--otlp` is passed *and* the map contains Java findings; SCIP's
+`scip-java` only runs when `.java` files are present. Auditing a repo in any
+other language touches none of this: verified by running `trace --otlp`
+against the Python fixture and confirming no Java-related output or behavior.
 
 ## Form factor
 
@@ -57,57 +69,70 @@ give (for example, function-level timings).
 | Precise calls | SCIP (one reader for every indexer) | LSP call hierarchy where no indexer exists |
 | Fault injection | **fault server**: a local mock API or TCP proxy with latency, hang, reset and fail-first-N; counts every connection | Python in-process socket patches |
 | Reproduction | pytest wrappers drive any command; **`@@evidence` lines on stdout** from any language; **black-box** runs of the real program against the fault server | **native probes**: a small program in the target language, in a side project under `.audit/repros/native/` that depends on the repo by path, so the repo is never modified |
-| Runtime evidence | ✅ an OpenTelemetry receiver (OTLP/HTTP, protobuf and JSON, gzip) and file importer; spans mapped to map functions; client spans become observed external calls; ✅ heartbeat stalls (gaps between a program's own output lines), attributed to the deepest span covering the gap; ✅ sampling-profile import (V8 `.cpuprofile`, speedscope) | function-level tracers: Python `sys.monitoring` ✅; Node V8 profiler + coverage ✅; Rust `tracing` layer, Go runtime/trace, JVM JFR, .NET EventPipe to do |
-| Linter evidence | SARIF import (one importer; most linters emit SARIF) | a table of linter commands |
+| Runtime evidence | ✅ an OpenTelemetry receiver (OTLP/HTTP, protobuf and JSON, gzip) and file importer; spans mapped to map functions; client spans become observed external calls; ✅ heartbeat stalls (gaps between a program's own output lines), attributed to the deepest span covering the gap; ✅ sampling-profile import (V8 `.cpuprofile`, speedscope) | function-level tracers: Python `sys.monitoring` ✅; Node V8 profiler + coverage ✅; Rust `tracing-chrome` import ✅; Go runtime/trace, JVM JFR to do |
+| Linter evidence | ✅ SARIF import (one importer; most linters emit SARIF) | a table of linter commands to run them |
 | Verification of Argus itself | a CI matrix that installs every toolchain | one fixture per language per capability |
 
 ### Parity matrix
 
-✅ verified in this repo's tests · ◐ implemented, not yet verified (toolchain missing here) · ✗ missing
+✅ verified in this repo's tests, on a real program, this session · ◐ implemented, not yet verified for real · ✗ missing
 
 | Language | Static map | Effects | Precise calls (SCIP) | Runtime evidence | Repro: black-box | Repro: native probe | Linter import |
 |---|---|---|---|---|---|---|---|
-| Python | ✅ | ✅ | ◐ | ✅ tracer + OTLP | ✅ | ✅ in-process | ✗ |
-| Rust | ✅ | ✅ | ✅ | ◐ OTLP (SDK) | ✅ | ✅ | ✗ |
-| JavaScript | ✅ | ✅ | ◐ | ✅ V8 profiler + coverage (functions, stalls, exact counts), no setup; OTLP for external calls | ✅ | ✅ | ✗ |
-| TypeScript | ✅ | ✅ | ◐ | ◐ same Node profiler (runs under `tsx`/`ts-node`; transpiled lines map by function name) | ✅ | ◐ (needs `tsx`) | ✗ |
-| Go | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
-| Java | ✅ | ✅ | ◐ | ✅ OTLP (Java agent) | ✅ | ✅ | ✗ |
-| Kotlin | ✅ | ✅ | ◐ | ◐ OTLP (Java agent) | ◐ | ◐ | ✗ |
-| Scala | ✅ | ✅ | ◐ | ◐ OTLP (Java agent) | ◐ | ◐ | ✗ |
-| C# | ✅ | ✅ | ◐ | ◐ OTLP (.NET) | ✅ | ✅ | ✗ |
-| Swift | ✅ | ✅ | ✗ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
-| C | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ✅ | ✅ | ✗ |
-| C++ | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ✅ | ✅ | ✗ |
-| Ruby | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
-| PHP | ✅ | ✅ | ◐ | ◐ OTLP (SDK) | ◐ | ◐ | ✗ |
+| Python | ✅ | ✅ | ✅ scip-python | ✅ tracer + real OTLP SDK | ✅ | ✅ in-process | ✅ (neutral SARIF path) |
+| Rust | ✅ | ✅ | ✅ rust-analyzer | ✅ `tracing-chrome`, real trace | ✅ | ✅ | ✅ |
+| JavaScript | ✅ | ✅ | ✅ scip-typescript | ✅ V8 profiler + coverage, no setup; real OTLP (Node auto-instrumentation) | ✅ | ✅ | ✅ |
+| TypeScript | ✅ | ✅ | ✅ scip-typescript | ◐ same Node profiler (runs under `tsx`) | ✅ | ✅ (fixed a real `tsx` invocation bug) | ✅ |
+| Go | ✅ | ✅ | ✅ scip-go | ✅ real OTLP (Go SDK) | ✅ | ✅ | ✅ |
+| Java | ✅ | ✅ | ◐ scip-java (unverified here) | ◐ OTLP (Java agent implemented; large-file download unreliable in this sandbox, see below) | ✅ | ✅ | ✅ |
+| C | ✅ | ✅ | ◐ scip-clang (needs `compile_commands.json`) | ◐ OTLP (SDK) | ✅ | ✅ | ✅ |
+| C++ | ✅ | ✅ | ◐ scip-clang (needs `compile_commands.json`) | ◐ OTLP (SDK) | ✅ | ✅ | ✅ |
 
 "Runtime evidence" means OpenTelemetry spans through Argus's receiver, or a
-native channel where one is named. The protocol side is verified (real Python
-SDK exporter, official Java agent). A language stays ◐ until a real program in
-it has been traced in the tests.
+native channel where one is named. This session verified the OTLP protocol
+path for real against the Python SDK, the Go SDK and Node's
+auto-instrumentation (all three previously untested: the packages were not
+installed). The Java agent's own logic is implemented and reads correctly
+from the map (`jvm_methods_include`), but the agent jar itself could not be
+downloaded reliably here (large single-file downloads via GitHub/Maven Central
+timed out repeatedly in this sandbox even though package-manager traffic,
+npm/go/cargo, worked fine); it stays ◐ until run against a real JVM.
 
 Two channels are not tied to a language, so they get no column:
 - Heartbeat stalls work for any program that prints periodically (verified on
   Node and Python programs).
-- Profile import reads V8 `.cpuprofile` and speedscope JSON, which py-spy
-  (Python), rbspy (Ruby) and dotnet-trace (.NET) export. It is verified on
-  synthetic files only.
+- Profile import reads V8 `.cpuprofile` and speedscope JSON. py-spy is the
+  relevant real exporter in scope now; it could not be verified here because
+  macOS requires root to attach a profiler to another process
+  (`py-spy record` fails with "This program requires root on OSX" and this
+  sandbox has no passwordless sudo). Verified on synthetic files only.
 
 The black-box path runs any command, so it works in every language as soon as
 the program can be pointed at the fault server (an environment variable, config
-file or argument for the dependency's URL). It is marked ✅ where a real
-program in that language has been run and observed through `run_target` in the
-tests. Rust, JavaScript, Java and C# programs were run against the fault server;
-C and C++ programs were run for scaling.
+file or argument for the dependency's URL). Native probes are verified for
+all six languages this session: Rust and Java were already verified; Go and
+TypeScript needed real fixes (see below); JavaScript, C and C++ were already
+verified.
+
+**Two real bugs this session's verification work found and fixed:**
+- The TypeScript probe ran `node --import tsx probe.mjs`, which fails because
+  a global `npm install -g tsx` is not resolvable as a bare ESM specifier from
+  the probe's directory (`ERR_MODULE_NOT_FOUND`). Fixed by invoking the `tsx`
+  CLI directly, which registers its own loader.
+- The Rust `tracing-chrome` importer assumed a span's `file`/`line` came
+  through the event's `args`. A real recording puts them as top-level,
+  dot-prefixed keys (`.file`, `.line`) on the event itself. Both are checked
+  now.
+- `scip-go`'s command line was missing the `index` subcommand
+  (`scip-go --output` fails; it needs `scip-go index --output`), and its
+  install path had moved (`sourcegraph/scip-go` → `scip-code/scip-go`). Fixed.
 
 ### Getting to full parity (milestone M5)
 
 - **P1 ✅ Language-neutral reproduction**: the fault server, the `@@evidence`
   protocol for any process, black-box runs, and native probes (scaffolds and run
-  commands) for Rust, JS, Java, C# and C/C++. Templates exist for Go, TS,
-  Kotlin, Scala, Swift, Ruby and PHP. The queue no longer skips findings by
-  language.
+  commands) for all six languages in scope, all now verified against real
+  toolchains. The queue no longer skips findings by language.
 - **P2 Runtime evidence for every language.**
   - **P2a ✅ Neutral path**:
     - `trace --otlp` runs an OTLP/HTTP receiver (protobuf and JSON, gzip) and
@@ -121,16 +146,15 @@ C and C++ programs were run for scaling.
     - `trace --heartbeat REGEX` turns gaps between a program's own output lines
       into stalls, attributed to the deepest span covering each gap, or
       recorded at program level when there are no spans.
-    - Verified with the real OpenTelemetry Python SDK exporter and, end to end,
-      with the official Java agent on an unmodified Java program (method spans
-      mapped, HttpURLConnection calls observed, `io-in-loop` confirmed). `trace --otlp`
-      derives the Java agent's method list (`OTEL_INSTRUMENTATION_METHODS_INCLUDE`)
-      from the map's JVM findings and entry points, so no setup is needed for
-      function-level spans on the JVM.
-    - Also verified with Node's auto-instrumentation (`--require`), whose
-      chunked uploads the receiver decodes: external calls observed, and
-      findings in files without function spans reported as `not-traced`
-      rather than `not-exercised`. Heartbeats verified on a Node program.
+    - ✅ Verified with the real OpenTelemetry Python SDK exporter, the real Go
+      SDK (`otlptracehttp`, zero-config via env vars) and Node's
+      auto-instrumentation (`--require`), whose chunked uploads the receiver
+      decodes: external calls observed, findings in files without function
+      spans reported as `not-traced` rather than `not-exercised`. Heartbeats
+      verified on a Node program.
+    - The Java agent path (`OTEL_INSTRUMENTATION_METHODS_INCLUDE` derived from
+      the map's JVM findings and entry points) is implemented and unit-level
+      correct but not run against a real JVM here; see the parity matrix note.
   - **P2b Native function-level tracers** for languages whose OpenTelemetry
     setup needs code changes, or to go deeper than spans.
     - ✅ **Node** (JavaScript, TypeScript), with no code change and no
@@ -150,38 +174,72 @@ C and C++ programs were run for scaling.
       - Verified end to end: `blocking-in-async` confirmed with the blocking
         call named; `io-in-loop` confirmed from counts; an unpredicted CPU
         stall found; heartbeat and OTLP combined with the profiler.
-    - ✅ **Profile import** (`trace-import --profile`, `audit_trace_import`):
-      - a V8 `.cpuprofile` (Chrome or Deno DevTools);
-      - speedscope JSON, sampled or evented, the format py-spy, rbspy,
-        dotnet-trace and others export. Stalls need idle samples; runs without
-        them report stall rules as `not-verifiable`.
-
-      Verified on synthetic files. The real exporters have not been run in
-      the tests yet.
+    - ✅ **Rust `tracing-chrome` import** (`trace-import --chrome`,
+      `audit_trace_import`): a `#[tracing::instrument]`'d function emits a
+      begin/end pair per poll; a slice with long self time while an async
+      function is on the stack is a stall. Verified end to end on a real,
+      compiled tokio binary with a synchronous socket call inside an async
+      path (the shape of the bug this project exists for): `blocking-in-async`
+      confirmed with the correct call stack and duration, `io-in-loop`
+      confirmed from real per-symbol counts, and a `spawn_blocking`-offloaded
+      call correctly produced *no* stall. This also found and fixed the
+      file/line key-format bug above.
+    - **Profile import** (`trace-import --profile`, `audit_trace_import`):
+      - a V8 `.cpuprofile` (Chrome or Deno DevTools) — used automatically by
+        the Node channel, effectively verified there;
+      - speedscope JSON, sampled or evented, the format py-spy exports.
+        Stalls need idle samples; runs without them report stall rules as
+        `not-verifiable`. Verified on synthetic files only; a real py-spy
+        export could not be produced here (see the sudo/SIP note above).
     - Open:
-      - Rust: a `tracing` layer, or an import of Chrome trace-event JSON,
-        which `tracing-chrome` writes with one event pair per poll, so a long
-        poll is a stall;
-      - Go: runtime/trace or pprof;
+      - Go: runtime/trace or pprof (block/mutex profiles matter more than
+        stalls here, since goroutines don't share a single event loop);
       - JVM: JFR or async-profiler;
-      - .NET: verify dotnet-trace's speedscope export;
-      - Ruby: verify rbspy;
-      - Swift, C, C++: perf or samply.
-- **P3 Linter evidence**: ✅ SARIF importer (`lint-import`, MCP `audit_lint_import`, results placed in map
-  functions, corroborating equivalent map findings; tested on synthetic SARIF) and a runner for ruff,
-  golangci-lint and semgrep (unverified: none installed here). Open: runners for the rest, verifying real
-  linter output. Original scope: a SARIF importer plus a runner table (clippy via
-  clippy-sarif, ruff, golangci-lint, eslint, detekt, Roslyn analyzers, semgrep,
-  PMD/SpotBugs, RuboCop, PHPStan, SwiftLint). Imported results confirm or
-  contradict map findings.
-- **P4 Precise calls everywhere**: verify each SCIP indexer on a fixture; add an
-  LSP call-hierarchy fallback (sourcekit-lsp for Swift).
-- **P5 CI matrix**: GitHub Actions installing all toolchains and running every
-  per-language fixture for every capability. This turns ◐ into ✅ and keeps it
-  there.
-- **Evaluation corpus**: per language, real repositories with known bugs as
-  ground truth. Recall and false-positive rate per language and per capability.
-  Any user repo, such as a trading bot, joins as one more ground-truth case.
+      - C, C++: perf or samply.
+- **P3 ✅ Linter evidence**: SARIF importer (`lint-import`, MCP
+  `audit_lint_import`), results placed in map functions, corroborating
+  equivalent map findings (rule-id regex table: clippy, ruff/flake8-async,
+  golangci-lint, ESLint, Roslyn-style ids kept for reference). Verified on
+  hand-built SARIF exercising the correlation and lead paths. A built-in
+  runner exists for ruff, golangci-lint and semgrep (none installed here, so
+  unverified); any linter that writes SARIF elsewhere works via `--sarif`.
+- **P4 Precise calls everywhere**: rust-analyzer, scip-python, scip-typescript
+  and scip-go are all now verified end to end against real ambiguous-call
+  fixtures (name resolution genuinely ambiguous, SCIP resolves it correctly).
+  scip-java and scip-clang remain unverified (the latter also needs a
+  `compile_commands.json`, which is extra setup even once the binary exists).
+- **P5 CI matrix**: [ci.yml](.github/workflows/ci.yml) installs Rust, Node,
+  Java, Go and `tsx` and runs the suite on Linux/macOS/Windows, plus a nightly
+  `eval` job (below). **It has still never run**: there are no GitHub
+  credentials on the dev machine to push with, so it is written and
+  YAML-validated but unexercised. Expect first-run fixes (Windows paths,
+  toolchain versions). This is what turns ◐ into ✅ and keeps it there.
+- **Evaluation corpus** (`tests/eval/`): ✅ harness implemented and tested;
+  corpus seeded but not yet real.
+  - `corpus.yaml` holds cases of two kinds: `local` (a fixture in this repo)
+    and `git` (a real repository at a commit, with the file/function/rule
+    Argus should find there). `expected` findings are scored for recall by
+    rule and language; `must_be_absent` pairs are a targeted false-positive
+    check.
+  - `run.py` runs the real `map` CLI on each case and prints recall per case
+    and per rule (exit 1 on any miss or false positive, so CI can fail on a
+    regression). Verified to fail correctly on a deliberately broken case.
+    `--json` writes a machine-readable summary. Kept out of `pytest tests`
+    because `git` cases clone a real repo; the nightly `eval` job runs it.
+  - **Honest state of the corpus:** the 3 cases in it are all `local`
+    (`rust_trader`, `py_runtime`, `rust_runtime`): deliberately-injected bugs
+    of the exact categories Argus targets, not bugs mined from a real
+    project's history. They keep the harness itself tested and give a
+    non-zero baseline (3/3 cases, 100% recall, every expected finding
+    confirmed against real `map` output rather than assumed), but 100% recall
+    on fixtures you wrote to trigger the rules proves the harness works, not
+    that Argus is good on real code. **No `git` cases exist yet**: mining
+    real history needs `git clone` from GitHub, which was unreliable in the
+    dev sandbox this was built in (even a tiny 1 KB repo timed out). The
+    schema and `_fetch_git_case` are written and ready; what is missing is
+    finding real fix commits and checking the exact function names by
+    running `map` against them.
+  - Any user repo, such as a trading bot, joins as one more ground-truth case.
 
 ---
 
@@ -193,20 +251,15 @@ types, async rules, library rules and hooks.
 | Language | Blocking-in-async | Language-specific checks | Libraries recognised | SCIP indexer |
 |---|---|---|---|---|
 | Rust | ✅ tokio; `spawn_blocking`/`block_in_place` count as offloaded | sync lock held across `.await`; calls inside macros (`select!`, `join!`, `format!`) | reqwest (blocking default 30 s), ureq, std fs/net/process, sqlx, redis, tonic | rust-analyzer ✅ verified |
-| Python | ✅ asyncio; `to_thread`/`run_in_executor` count as offloaded | `with threading.Lock` around `await` | requests, httpx (5 s), aiohttp (300 s), urllib, subprocess, psycopg, Django/SQLAlchemy ORM, asyncpg, motor | scip-python |
-| JS / TS | ✅ event loop | `await` in loop | fs `*Sync`, child_process, fetch, axios, got, Prisma, Mongoose, pg, knex, TypeORM, better-sqlite3 | scip-typescript |
-| Go | n/a | goroutine per loop iteration; `defer` in loop; `ctx`-aware calls | net/http (DefaultClient has no timeout), database/sql, sqlx, pgx, gorm, grpc, os/exec | scip-go |
-| Java | n/a | stream lambdas count as loops | java.net.http, OkHttp (10 s), RestTemplate, WebClient, JDBC, Spring Data repositories, JPA | scip-java |
-| Kotlin | ✅ coroutines; `withContext(Dispatchers.IO)` counts as offloaded | `runBlocking` inside a suspend function | OkHttp, Ktor, JDBC, Spring Data | scip-java |
-| Scala | ✅ inside `Future {}` / `IO {}` | `Await.result` | sttp, akka/pekko-http | scip-java |
-| C# | ✅ async/await; `Task.Run` counts as offloaded | sync-over-async (`.Result`, `.Wait()`, `GetAwaiter().GetResult()`) | HttpClient (100 s), Dapper/ADO.NET, EF Core, File.* | scip-dotnet |
-| Swift | ✅ async/await; `Task {}` | semaphore waits | URLSession (60 s), Alamofire, `Data(contentsOf:)` | none (no mature indexer) |
-| C / C++ | n/a | `future.get()` waits | libcurl (no timeout by default), sockets, sqlite/libpq/mysql, cpr | scip-clang (needs `compile_commands.json`) |
-| Ruby | n/a | iterator blocks count as loops | Net::HTTP (60 s), HTTParty, Faraday, ActiveRecord (N+1) | scip-ruby |
-| PHP | n/a | none yet | curl, Guzzle (no timeout), Laravel HTTP (30 s), PDO, Eloquent (N+1) | scip-php |
+| Python | ✅ asyncio; `to_thread`/`run_in_executor` count as offloaded | `with threading.Lock` around `await` | requests, httpx (5 s), aiohttp (300 s), urllib, subprocess, psycopg, Django/SQLAlchemy ORM, asyncpg, motor | scip-python ✅ verified |
+| JS / TS | ✅ event loop | `await` in loop | fs `*Sync`, child_process, fetch, axios, got, Prisma, Mongoose, pg, knex, TypeORM, better-sqlite3 | scip-typescript ✅ verified |
+| Go | n/a | goroutine per loop iteration; `defer` in loop; `ctx`-aware calls | net/http (DefaultClient has no timeout), database/sql, sqlx, pgx, gorm, grpc, os/exec | scip-go ✅ verified (command line and install path both needed fixing) |
+| Java | n/a | stream lambdas count as loops | java.net.http, OkHttp (10 s), RestTemplate, WebClient, JDBC, Spring Data repositories, JPA | scip-java (unverified here) |
+| C / C++ | n/a | `future.get()` waits | libcurl (no timeout by default), sockets, sqlite/libpq/mysql, cpr | scip-clang (needs `compile_commands.json`; unverified here) |
 
-"✅ verified" means tested in this repo. Other indexer command lines follow each
-project's README and may need adjusting.
+"✅ verified" means tested in this repo, this session, against a real
+ambiguous-call fixture and the actual indexer binary. Other indexer command
+lines follow each project's README and may need adjusting.
 
 **How call resolution works, from best to weakest:**
 1. SCIP index (precise).
@@ -237,12 +290,12 @@ fits in our milestones.
 | Tool / technique | Languages | Use |
 |---|---|---|
 | tree-sitter (+ language pack) | all | **M1 ✅** parsing |
-| SCIP indexers (rust-analyzer, scip-python, scip-typescript, scip-java, scip-go, scip-clang, scip-dotnet, scip-ruby, scip-php) | per language | **M1.5 ✅** precise calls |
-| LSP call hierarchy (`callHierarchy/incomingCalls`) | any language with an LSP server | fallback when no SCIP indexer exists (Swift via sourcekit-lsp) |
+| SCIP indexers (rust-analyzer, scip-python, scip-typescript, scip-java, scip-go, scip-clang) | per language | **M1.5 ✅** precise calls |
+| LSP call hierarchy (`callHierarchy/incomingCalls`) | any language with an LSP server | fallback when no SCIP indexer exists (e.g. `clangd` for C/C++ before a `compile_commands.json` exists) |
 | stack-graphs (GitHub), Kythe, Glean, LSIF | multi | alternative precise indexes |
 | Call-graph algorithms (CHA, RTA, points-to), PyCG, go `callgraph` (VTA), WALA, Soot/SootUp, Doop | per language | virtual-dispatch precision |
-| CodeQL | C/C++, C#, Go, Java/Kotlin, JS/TS, Python, Ruby, Swift | data flow, taint, custom queries (M3: "does this value reach that loop bound?") |
-| Joern (code property graphs) | C/C++, Java, JS, Python, PHP, Kotlin | cross-function data flow queries |
+| CodeQL | C/C++, Go, Java, JS/TS, Python | data flow, taint, custom queries (M3: "does this value reach that loop bound?") |
+| Joern (code property graphs) | C/C++, Java, JS, Python | cross-function data flow queries |
 | Semgrep / ast-grep | 30+ | cheap custom rules; easy for the agent to generate |
 
 ### B. Existing linters that already encode some of our rules
@@ -251,22 +304,25 @@ We import their results as extra evidence instead of re-implementing them.
 
 | Rule area | Tools |
 |---|---|
-| Blocking in async | ruff/flake8-async (`ASYNC2xx`), clippy (`await_holding_lock`, `await_holding_refcell_ref`), Microsoft.VisualStudio.Threading.Analyzers (VSTHRD002/103), AsyncFixer, detekt coroutine rules, BlockHound (runtime, JVM), Ben.BlockingDetector (runtime, .NET) |
+| Blocking in async | ruff/flake8-async (`ASYNC2xx`), clippy (`await_holding_lock`, `await_holding_refcell_ref`), AsyncFixer, BlockHound (runtime, JVM) |
 | Missing timeouts / context | golangci-lint `noctx`, `bodyclose`; ruff `S113` (requests without timeout); Semgrep rules |
-| Await in loops, N+1 | eslint `no-await-in-loop`; bullet (Rails, runtime); nplusone and django-silk (Python); Laravel Debugbar/Telescope; Hibernate statistics |
-| Performance lints | ruff `PERF`, Perflint, clippy `perf`, staticcheck, gocritic, SpotBugs, Error Prone, PMD, Roslyn CA18xx, SwiftLint, clang-tidy `performance-*`, cppcheck, RuboCop Performance, PHPStan/Psalm/Larastan |
-| General static analysis | Infer (Meta), SonarQube, Coverity, PVS-Studio, gosec, Brakeman, Bandit, Pysa |
+| Await in loops, N+1 | eslint `no-await-in-loop`; nplusone (Python); Hibernate statistics |
+| Performance lints | ruff `PERF`, Perflint, clippy `perf`, staticcheck, gocritic, SpotBugs, Error Prone, PMD, clang-tidy `performance-*`, cppcheck |
+| General static analysis | Infer (Meta), SonarQube, Coverity, PVS-Studio, gosec, Bandit, Pysa |
 | Regex blow-ups (ReDoS) | recheck, regexploit, safe-regex, CodeQL `js/redos` |
+
+This is where [`lint-import`](#getting-to-full-parity-milestone-m5) (P3, done)
+plugs in: any of these that write SARIF become evidence.
 
 ### C. Input exploration (finding the extreme cases)
 
 | Technique | Tools | Use |
 |---|---|---|
-| Property-based testing | Hypothesis, proptest, quickcheck, fast-check, jqwik, FsCheck/CsCheck, rapid/gopter, ScalaCheck, Kotest, PropCheck | **M3**: the agent writes properties, the tool searches for counterexamples |
-| Coverage-guided fuzzing | AFL++, libFuzzer, honggfuzz, cargo-fuzz, cargo-afl, Atheris, Jazzer, Jazzer.js, native Go fuzzing, SharpFuzz; OSS-Fuzz and ClusterFuzzLite for CI | **M3**: generated harnesses, OSS-Fuzz-gen style |
+| Property-based testing | Hypothesis (Python), proptest/quickcheck (Rust), fast-check (JS/TS), jqwik (Java) | **M3**: the agent writes properties, the tool searches for counterexamples |
+| Coverage-guided fuzzing | AFL++, libFuzzer, honggfuzz, cargo-fuzz, cargo-afl (Rust), Atheris (Python), Jazzer/Jazzer.js (Java/JS), native Go fuzzing; OSS-Fuzz and ClusterFuzzLite for CI | **M3**: generated harnesses, OSS-Fuzz-gen style |
 | **Performance fuzzing** | PerfFuzz, SlowFuzz, HotFuzz (JVM), Singularity, Badger | **M5**: search for inputs that maximize run time or call counts, which is exactly the "extreme case" goal |
 | API / protocol fuzzing | Schemathesis (OpenAPI/GraphQL), RESTler, EvoMaster, Dredd | fuzzing across service boundaries |
-| Symbolic / concolic execution | KLEE, SymCC, angr, Manticore, CrossHair (Python), ExpoSE (JS), Symbolic PathFinder (Java), Pex/IntelliTest (.NET) | **M5**: the "dry run the algorithm" step for hot functions |
+| Symbolic / concolic execution | KLEE, SymCC, angr, Manticore (C/C++), CrossHair (Python), ExpoSE (JS), Symbolic PathFinder (Java) | **M5**: the "dry run the algorithm" step for hot functions |
 | Model checking / proofs | Kani (Rust), CBMC, JBMC, Prusti, Creusot, TLA+/PlusCal, P language | proving loop bounds and invariants on critical code |
 | Automatic test generation | Pynguin, EvoSuite, Randoop, UTBot, Diffblue Cover, CoverUp, Cover-Agent, TestGen-LLM | seed tests for the investigator |
 | Metamorphic testing | framework-free (write relations) | trading maths: "scaling all prices by k scales PnL by k", "reordering independent fills leaves the position unchanged" |
@@ -278,17 +334,13 @@ We import their results as extra evidence instead of re-implementing them.
 
 | Language | Tracing / profiling | Detects blocking or event-loop stalls |
 |---|---|---|
-| Rust | `tracing` (+ tracing-chrome, tracing-timing), samply, cargo-flamegraph, perf, dhat-rs, criterion/divan, iai-callgrind, coz (causal profiling), tokio-metrics | **tokio-console** (task poll times, busy tasks) |
-| Python | `sys.monitoring` (PEP 669), cProfile, py-spy, Scalene, pyinstrument, Austin, yappi, memray, viztracer | **asyncio debug mode `slow_callback_duration`**, aiomonitor |
-| Node / TS | `--cpu-prof`, clinic.js (doctor/bubbleprof/flame), 0x, `diagnostics_channel`, `async_hooks` | **`perf_hooks.monitorEventLoopDelay`**, blocked-at |
+| Rust | `tracing` (+ **tracing-chrome** ✅ imported, tracing-timing), samply, cargo-flamegraph, perf, dhat-rs, criterion/divan, iai-callgrind, coz (causal profiling), tokio-metrics | **tokio-console** (task poll times, busy tasks) |
+| Python | `sys.monitoring` (PEP 669) ✅ built-in tracer, cProfile, py-spy, Scalene, pyinstrument, Austin, yappi, memray, viztracer | **asyncio debug mode `slow_callback_duration`**, aiomonitor |
+| Node / TS | `--cpu-prof` ✅ automatic, clinic.js (doctor/bubbleprof/flame), 0x, `diagnostics_channel`, `async_hooks` | **`perf_hooks.monitorEventLoopDelay`**, blocked-at |
 | Go | pprof (CPU, heap, **block**, **mutex**), runtime/trace, httptrace, fgprof, benchstat | block/mutex profiles, goleak |
 | JVM | JFR + JMC, async-profiler, JMH, Arthas, VisualVM | **BlockHound**, JFR thread-park events |
-| .NET | dotnet-trace, dotnet-counters, dotnet-monitor, PerfView, BenchmarkDotNet | **thread-pool starvation counters**, Ben.BlockingDetector |
 | C / C++ | perf, eBPF (bpftrace, BCC `offcputime`), uftrace, LLVM XRay, `-finstrument-functions`, Valgrind (callgrind, massif), Tracy, VTune, sanitizers (ASan, UBSan, TSan) | off-CPU analysis |
-| Ruby | stackprof, rbspy, ruby-prof, TracePoint, rack-mini-profiler | bullet (N+1) |
-| PHP | Xdebug, SPX, Excimer, Blackfire, Tideways | Debugbar/Telescope query counts |
-| Swift | Instruments (Time Profiler, Swift Concurrency, System Trace), `os_signpost` | Thread Performance Checker, hang detection |
-| Any language | OpenTelemetry (auto-instrumentation for Java, .NET, Python, Node, Go via eBPF/Beyla), Pyroscope/Parca continuous profiling, Jaeger/Tempo | trace critical-path analysis |
+| Any language | OpenTelemetry ✅ receiver + real SDK/agent verified (Java agent, Python, Node, Go), Pyroscope/Parca continuous profiling, Jaeger/Tempo | trace critical-path analysis |
 | OS level | strace/ltrace, dtrace; **Windows: ETW, WPR/WPA, Process Monitor** | wait analysis |
 
 **Plan for M2.** Use a language-native tracer to record, per call:
@@ -305,9 +357,9 @@ fits log-log and change-point models (`big_O`-style).
 |---|---|
 | Latency, timeouts, dropped connections | **Toxiproxy**, tc netem (Linux), **clumsy** (Windows), Pumba, Chaos Mesh, Litmus, AWS FIS, Gremlin |
 | Mock servers with delays and error responses | WireMock, MockServer, Mountebank, Hoverfly, Prism (OpenAPI), wiremock-rs, httpmock, mockito (Rust), respx/aioresponses/responses (Python), msw/nock (JS) |
-| Record once, replay later | vcrpy, pytest-recording, VCR (Ruby), Polly.JS, go-vcr, WireMock recording, mitmproxy, GoReplay, Speedscale |
+| Record once, replay later | vcrpy (Python), Polly.JS, go-vcr, WireMock recording, mitmproxy, GoReplay, Speedscale |
 | Failpoints inside code | `fail` crate (Rust), pingcap/failpoint (Go), Byteman (JVM) |
-| **Deterministic simulation** | **turmoil** and **madsim** (tokio), shuttle and loom (Rust concurrency), Coyote (.NET), Lincheck (Kotlin/JVM), FoundationDB-style simulation, Antithesis |
+| **Deterministic simulation** | **turmoil** and **madsim** (tokio), shuttle and loom (Rust concurrency), Lincheck (JVM), FoundationDB-style simulation, Antithesis |
 | Distributed correctness | Jepsen/Elle, Porcupine (linearizability) |
 | Trading-specific | exchange testnets and paper accounts (Binance testnet, Coinbase sandbox, Alpaca paper, IBKR paper); market-data tick replay; event-driven backtesters with latency models (**nautilus_trader**, **hftbacktest**, Lean, backtrader) |
 | Load and stress | k6, Locust, Gatling, wrk2, vegeta, oha, goose, Artillery, JMeter |
@@ -315,7 +367,7 @@ fits log-log and change-point models (`big_O`-style).
 The same recipe works in any language. For example, for the motivating bug (a
 sync exchange call in an async trading loop):
 1. Point the exchange client at Argus's fault server (or Toxiproxy, or a
-   deterministic simulator such as turmoil/madsim for Rust or Coyote for .NET).
+   deterministic simulator such as turmoil/madsim for Rust).
 2. Inject 30 s of latency on one call.
 3. Assert, from the program's heartbeat lines or a native probe, that the loop
    still ticks within its deadline.
@@ -407,13 +459,14 @@ what the agents decide.
     `evidence.py` joins the trace to `map.json`: confirmed / not-observed /
     not-exercised / measured / not-verifiable per finding, unpredicted stalls,
     N+1 fan-out per activation, recursion depth, log-log complexity fits.
-  - Adapters still to write: Rust (`tracing` layer writing the same tables),
-    Node (`diagnostics_channel` / `--cpu-prof`), Go (pprof), JVM (JFR), .NET
-    (EventPipe). Each reads `AUDIT_TRACE_*` from `trace/run.py`.
+  - ✅ Node (`--cpu-prof` / `NODE_V8_COVERAGE`, automatic) and ✅ Rust
+    (`tracing-chrome` import, real-trace verified). Each reads `AUDIT_TRACE_*`
+    from `trace/run.py`. Adapters still to write: Go (pprof), JVM (JFR).
   - Fault injection ✅ in-process for Python (`repro/harness.py`: socket-level
     latency and hangs). Toxiproxy/clumsy for out-of-process targets: to do.
   - Safety hook ✅ (`hooks/hooks.json`, `scripts/hooks/guard.py`).
-  - Import of results from existing linters (section B) as extra evidence.
+  - ✅ Import of results from existing linters (section B) as extra evidence
+    (`linters.py`, SARIF).
 - **M3: investigator.** ✅ (Python)
   - `agents/investigator.md`: one finding in, one JSON verdict out
     (confirmed / rejected / inconclusive) with hypothesis {trigger,
@@ -429,9 +482,10 @@ what the agents decide.
   - `hooks/hooks.json` + `scripts/hooks/guard.py`: PreToolUse guard blocking
     live exchange hosts, credentials and PROD markers in audit runs, remote URLs
     and secrets in reproduction files, and destructive commands.
-  - `.mcp.json` + `scripts/mcp_server.py`: `audit_map`, `audit_trace`, `run_repro`.
+  - `.mcp.json` + `scripts/mcp_server.py`: `audit_map`, `audit_trace`, `run_repro`,
+    `audit_trace_import`, `audit_lint_import`, `audit_queue`, `audit_record`, `audit_report`.
   - Still to do: property-based and fuzzing reproductions (needs Hypothesis
-    templates), non-Python harnesses.
+    templates).
 - **M4: orchestration.** ✅
   - `effects.py` (all languages, static):
     - Each call site's worst-case wait comes from its explicit timeout, a
@@ -444,8 +498,8 @@ what the agents decide.
       JS milliseconds and positional `wait_for(..., 10)`.
     - Findings: `deadline-cannot-preempt`, `timeout-budget-exceeded`,
       `hang-reaches-entry`, `retry-without-backoff`, `unbounded-retry`,
-      `retry-amplification`, `panic-on-io-error` (Rust `unwrap`/`expect`,
-      Swift `try!`), `ignored-io-error` (Go `_`).
+      `retry-amplification`, `panic-on-io-error` (Rust `unwrap`/`expect`),
+      `ignored-io-error` (Go `_`).
     - A summary goes into `map.json` → `effects`: entry points with their worst
       wait, every deadline with its status, every retry site.
     - Calibrated on rattler:
@@ -478,7 +532,8 @@ what the agents decide.
     `count_connects()` for retry reproductions.
 - **M5: language parity.** See [Getting to full parity](#getting-to-full-parity-milestone-m5).
   - P1 ✅ Language-neutral reproduction (`repro/faults.py`, `repro/native.py`,
-    `fault-server` and `probe` CLI commands):
+    `fault-server` and `probe` CLI commands), now verified for real across all
+    six languages in scope:
     - `FaultServer`: a mock HTTP API or TCP proxy with `latency`, `hang`,
       `reset` and `fail_first`. It records each connection's time and peer, and
       the gaps between connections.
@@ -487,7 +542,10 @@ what the agents decide.
       arrival times, `@@evidence` lines, and heartbeat gaps. It kills the whole
       process tree on timeout.
     - Native probe scaffolds: a side project per language that depends on the
-      repo by path, plus a small evidence helper in that language.
+      repo by path, plus a small evidence helper in that language. Go's probe
+      (hang + retry-burst) and TypeScript's probe (event-loop stall + hang,
+      after fixing the `tsx` invocation) are now verified against real
+      toolchains, joining Rust, JavaScript, Java, C and C++.
   - P2a ✅ Language-neutral runtime evidence (`trace/otlp.py`, `trace/spans.py`,
     `trace --otlp`, `trace --heartbeat`, `trace-import`):
     - an OTLP/HTTP receiver and decoders, sharing a hand-written protobuf
@@ -498,11 +556,18 @@ what the agents decide.
     - heartbeat logs with stall attribution.
 
     `evidence.py` needed no change for stalls: attributed heartbeat stalls use
-    the same stack format as the Python tracer's.
-  - P2b, partly done (`trace/profiles.py`, `trace/sources.py`, `trace --node`,
-    `trace-import --profile/--coverage`, MCP `audit_trace_import`):
+    the same stack format as the Python tracer's. The real Python SDK, real Go
+    SDK and real Node auto-instrumentation exporters are now all verified
+    against the receiver (previously none of the three were actually
+    installed, so this path was unverified despite being marked done).
+  - P2b, mostly done for the 6-language scope (`trace/profiles.py`,
+    `trace/chrome.py`, `trace/sources.py`, `trace --node`,
+    `trace-import --profile/--coverage/--chrome`, MCP `audit_trace_import`):
     - readers for V8 `.cpuprofile` and speedscope (sampled and evented), and
       V8 coverage as exact counts (`CountRec` in the trace store);
+    - ✅ a Chrome trace-event reader for Rust `tracing-chrome` output, verified
+      end to end against a real compiled tokio binary (see the parity matrix
+      note above for the two bugs this found);
     - `evidence.py` knows sampled runs. It never counts calls from samples.
       It confirms N+1 findings from count ratios, and reports sampled-only
       rules (recursion depth, complexity fits) as `not-verifiable`;
@@ -512,33 +577,89 @@ what the agents decide.
     - `Mapper.rel` no longer maps `node_modules/x/index.js` to the repo's
       `index.js` by suffix.
 
-    Native tracers for Rust, Go, JVM and .NET are still open.
-  - P3 SARIF linter import, P4 SCIP/LSP everywhere, P5 CI matrix, evaluation
-    corpus: open.
+    Native tracers for Go and JVM are still open (C/C++ has no dedicated
+    native tracer either, but is covered by the OTLP path).
+  - P3 ✅ SARIF linter import (`linters.py`, `lint-import`, `audit_lint_import`).
+  - P4 SCIP everywhere: 4 of 6 verified for real this session
+    (rust-analyzer, scip-python, scip-typescript, scip-go); scip-java and
+    scip-clang open.
+  - P5 CI matrix: written, never run (see above). Evaluation harness:
+    ✅ built and tested; real corpus cases: open.
+  - **Packaging and cost (Phase 6)**:
+    - ✅ **Zero-setup install.** Both entry points now bootstrap themselves:
+      `mcp_server.py` (already did) and `auditor_cli.py` (new: skills invoke
+      the CLI through Bash, *not* MCP, so the MCP-only bootstrap did not
+      actually cover the primary Claude Code workflow). If `tree_sitter` /
+      `mcp` are not importable, a private virtualenv is built under
+      `~/.cache/argus/venv` (or `$ARGUS_HOME`), `requirements.txt` is
+      installed into it once, and the process re-execs under it.
+      Verified for real from a bare `python3 -m venv` with nothing installed
+      but pip: venv built, `tree_sitter`, `tree_sitter_language_pack`, `mcp`
+      and `pytest` all installed, process re-exec'd and stayed up; a second
+      run reuses the cache and starts in 0.13 s. Cold first run took ~25 s
+      with a warm pip cache; expect longer on a truly cold machine.
+      **Caveat, not fixed:** if you use the MCP tools directly (not the
+      skills), that first-run install happens *before* the server answers its
+      handshake, and I could not confirm Claude Code's MCP startup timeout.
+      If the MCP tools are missing right after installing the plugin, wait
+      and restart once; the cached venv makes every later start instant.
+      The skills path is unaffected (a Bash call has no such timeout).
+    - ✅ **MCP results trimmed.** Every tool already wrote its full result to
+      `.audit/`; it also returned all of it, thousands of tokens on a large
+      repo. Now `audit_map`, `audit_trace` and `audit_trace_import` return
+      counts by severity and rule plus the 10 most severe findings (message
+      text cut to 240 chars) and a note pointing at the file for the rest;
+      `full=True` restores the old behaviour. `run_repro` returns counts by
+      outcome and only the tests that did *not* pass; `audit_lint_import`
+      returns 10 leads instead of 30. Checked on a 15-finding fixture: 15 on
+      disk, 10 returned. *Not measured:* actual token savings, since that
+      needs a real audit run.
+    - ✅ **Investigator cap.** `maxTurns` 40 → 20 (a normal investigation is
+      ~5–10 tool calls), plus an explicit budget in the agent's instructions:
+      one focused attempt and at most one revised hypothesis before
+      `rejected`/`inconclusive`. This complements the existing "two failed
+      attempts to build → inconclusive" rule, which only covered build
+      errors, not open-ended re-hypothesising.
+    - ✅ **`action.yml`.** A composite GitHub Action for other repos:
+      static `map`, optional linter SARIF, a job summary, an uploaded
+      `.audit/` artifact, and an optional `fail-on: high|medium|low|info`
+      severity gate. No AI credentials needed. Its two bits of glue live in
+      `scripts/ci_helpers.py` (tested) rather than inline YAML heredocs, after
+      a first draft got Python-in-YAML indentation wrong. **Never run on
+      GitHub**; the optional AI step (`claude-code-action` / Agent SDK with
+      the budget flags) is not written, since it needs secrets only the
+      repo owner can set.
+    - ⛔ **Not done: a real token-cost measurement.** That needs an actual
+      agentic audit run on a mid-size repo with token counts recorded; I
+      cannot fabricate that number, and it is the one input needed to tell
+      whether the trimming above matters in practice.
 - **M6: deep verification**, in every language:
-  - deterministic simulation (turmoil/madsim for Rust, Coyote for .NET,
-    Lincheck for the JVM, simulated clocks elsewhere);
+  - deterministic simulation (turmoil/madsim for Rust, simulated clocks
+    elsewhere);
   - performance fuzzing on hot functions (PerfFuzz-style, per language via its
-    fuzzer: cargo-fuzz, Atheris, Jazzer, Go fuzzing, SharpFuzz);
+    fuzzer: cargo-fuzz, Atheris, Jazzer, Go fuzzing);
   - Daikon-style invariant mining;
   - proofs and symbolic checks on critical maths (Kani, CrossHair, JBMC, KLEE).
 - **Backlog of static rules:**
   - ✅ retry without backoff, unbounded retries, retry amplification (M4);
   - ✅ `unwrap`/`expect` on network and DB results (M4). Open: panics on parsed
-    external data (JSON fields, index access);
+    external data (JSON fields, index access) beyond what `patterns.py`
+    already flags for Rust and Go;
   - ✅ (heuristic, source patterns in `langs/patterns.py`, tested on Rust and
     Python): backoff without jitter, unbounded channels and queues, sequential
     awaits, spawns never joined, floats for money, `SystemTime`/wall clock used for
     intervals, regexes with nested repeats, loading all rows, panics on parsed
-    data (Rust, Go, Swift, Kotlin), CPU-heavy work on an async path (nested loops
+    data (Rust, Go), CPU-heavy work on an async path (nested loops
     with no await). Open: non-idempotent retries (POST without an idempotency
     key); retry libraries configured by call (tokio-retry, `backoff::retry`,
-    retry-go, Polly, p-retry); per-language tuning of the patterns on real code
-    (false-positive rate unmeasured).
-- **Evaluation:** a corpus of real repositories per language with known bugs as
-  ground truth. Measure recall and false-positive rate per language and per
-  capability on each milestone. Any user repo (a trading bot with the sync API
-  call, say) is one more ground-truth case, not the target.
+    retry-go, p-retry); per-language tuning of the patterns on real code
+    (false-positive rate unmeasured); pattern-rule tests for JS/TS, Go, Java,
+    C/C++ (only Rust and Python are tested today).
+- **Evaluation:** `tests/eval/` (see P5 above): harness built, corpus seeded
+  with 3 local cases, real `git` cases still to collect. Measure recall and
+  false-positive rate per language and per capability on each milestone. Any
+  user repo (a trading bot with the sync API call, say) is one more
+  ground-truth case, not the target.
 
 ## Risks
 
@@ -548,10 +669,18 @@ what the agents decide.
 - **Cost of one agent per function:** avoid it. Rank hotspots and cap the budget.
 - **Realistic inputs for microservices:** record/replay, mocks and deterministic
   simulation are where most of the effort goes.
-- **Unverified languages:** several toolchains (Go, Ruby, PHP, Swift, Kotlin,
-  Scala) are not installed on the development machine, so their SCIP indexers,
-  native probes and black-box runs are implemented but unverified. The CI matrix
-  (P5) is the fix; until then the parity matrix says ◐, not ✅.
+- **Unverified languages:** all six in-scope toolchains are installed and
+  their native probes, black-box runs and SCIP indexers (except scip-java and
+  scip-clang) are now verified for real on this machine. What remains ◐ is
+  the JVM agent (blocked by unreliable large-file downloads in this sandbox,
+  not by missing code) and scip-clang (needs a `compile_commands.json`). The
+  CI matrix (P5) is what keeps this from rotting once it is ✅.
 - **One-language drift:** new features tend to land in the language at hand
   first. Every new capability needs a language-neutral path, or an entry in the
   parity matrix saying which languages lack it.
+- **Large single-file downloads are unreliable in this sandbox:** package
+  manager traffic (npm, go, cargo) works fine, but a raw multi-megabyte file
+  over HTTPS (a GitHub release asset, a Maven Central jar) repeatedly failed
+  with SSL/HTTP2 stream errors partway through, on two different hosts. Retry
+  with `-C -` (resume) sometimes gets there; budget for it when a task needs
+  one.

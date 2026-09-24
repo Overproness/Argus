@@ -120,7 +120,7 @@ class Mapper:
         return None
 
 
-JVM_LANGS = {"java", "kotlin"}
+JVM_LANGS = {"java"}
 
 
 def jvm_methods_include(map_data: dict, limit: int = 200) -> str | None:
@@ -135,7 +135,7 @@ def jvm_methods_include(map_data: dict, limit: int = 200) -> str | None:
     by_class: dict[str, set[str]] = defaultdict(set)
     for q in sorted(wanted)[:limit]:
         cls, _, method = q.rpartition(".")
-        if cls and cls.split(".")[-1][:1].isupper():  # skip Kotlin top-level functions (no class to name)
+        if cls and cls.split(".")[-1][:1].isupper():  # skip top-level functions (no class to name)
             by_class[cls].add(method)
     return ";".join(f"{c}[{','.join(sorted(ms))}]" for c, ms in sorted(by_class.items())) or None
 

@@ -128,6 +128,25 @@ def test_real_opentelemetry_sdk_exports_to_the_receiver(tmp_path):
     assert outer.resource["telemetry.sdk.language"] == "python"
 
 
+@pytest.mark.skipif(shutil.which("go") is None, reason="go not installed")
+def test_real_go_otel_sdk_exports_to_the_receiver(tmp_path):
+    fx = FIXTURES / "otel_go"
+    exe = tmp_path / ("otelgo.exe" if sys.platform == "win32" else "otelgo")
+    subprocess.run(["go", "build", "-o", str(exe), "."], cwd=fx, check=True, capture_output=True,
+                   text=True, timeout=180)
+    rec = otlp.Receiver().start()
+    try:
+        r = subprocess.run([str(exe)], env={**os.environ, **rec.env("interop-go")},
+                           capture_output=True, text=True, timeout=30)
+        assert r.returncode == 0, r.stderr
+    finally:
+        rec.stop()
+    by_name = {s.name: s for s in rec.spans}
+    outer, client = by_name["outer"], by_name["GET"]
+    assert client.parent_id == outer.span_id and client.kind == 3 and client.status == 2
+    assert outer.attrs["items.count"] == 3 and outer.resource["service.name"] == "interop-go"
+
+
 # --- mapping spans and heartbeats to the static map ------------------------------------------------
 
 MAP = {

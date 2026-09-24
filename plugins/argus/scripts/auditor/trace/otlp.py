@@ -1,7 +1,7 @@
 """OpenTelemetry spans in, from any language: an OTLP/HTTP receiver and file importer.
 
-Any program instrumented with OpenTelemetry (the Java or .NET agents, the Node,
-Python, Go, Ruby, PHP or Rust SDKs, ...) exports its spans here when run with
+Any program instrumented with OpenTelemetry (the Java agent, the Node,
+Python, Go or Rust SDKs, ...) exports its spans here when run with
 
   OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:<port>   (set by `trace --otlp`)
 

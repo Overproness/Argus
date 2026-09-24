@@ -4,9 +4,11 @@
 slice per poll. A slice with long self time is a poll that held its thread: a synchronous call blocking the
 async runtime. `X` (complete) events are read too; async `b`/`e` pairs are ignored.
 
-Slices map to repo functions by their `file`/`line` args when the writer records them (an `#[instrument]`
-attribute sits a few lines above the fn), else by span name. A slice that maps to nothing is transparent: its
-time is self time of the nearest mapped ancestor, as library calls are in the Python tracer.
+Slices map to repo functions by their `.file`/`.line` fields (real `tracing-chrome` output puts these as
+top-level keys on the event itself, dot-prefixed, not inside `args`; other writers may use `args` instead, so
+both are read) when the writer records them (an `#[instrument]` attribute sits a few lines above the fn), else
+by span name. A slice that maps to nothing is transparent: its time is self time of the nearest mapped
+ancestor, as library calls are in the Python tracer.
 
 Limits: Threaded-style spans carry no id, so each poll is its own call (a callee's per-poll calls can overstate
 N+1 fan-out); a slice is a stall only with an async function on its stack, since a long synchronous slice on a
@@ -21,13 +23,16 @@ from .spans import FnRef, Mapper
 from .store import CallRec, StallRec, Trace
 
 PID_BASE = 3_000_000_000
-FILE_KEYS = ("file", "filename", "code.filepath", "code.file")
-LINE_KEYS = ("line", "lineno", "code.lineno", "code.line")
+# tracing-chrome writes these as top-level, dot-prefixed keys on the event itself. Other writers of the
+# format may put them under `args` with plainer names instead, so both are checked.
+FILE_KEYS = (".file", "file", "filename", "code.filepath", "code.file")
+LINE_KEYS = (".line", "line", "lineno", "code.lineno", "code.line")
 ATTR_SLACK = 8  # lines an attribute may sit above its fn
 
 
-def _arg(args: dict, keys: tuple[str, ...]):
-    return next((args[k] for k in keys if k in args), None)
+def _field(event: dict, keys: tuple[str, ...]):
+    args = event.get("args") or {}
+    return next((event[k] if k in event else args[k] for k in keys if k in event or k in args), None)
 
 
 def _threads(events: list[dict]):
@@ -100,9 +105,8 @@ def attach(trace: Trace, trace_dir: Path, map_data: dict, repo: Path, stall_s: f
             stack: list[dict] = []
             for kind, e in seq:
                 if kind == "B":
-                    args = e.get("args") or {}
-                    ln = _arg(args, LINE_KEYS)
-                    fn = resolve(str(e.get("name", "")), _arg(args, FILE_KEYS), int(ln) if str(ln).isdigit() else None)
+                    ln = _field(e, LINE_KEYS)
+                    fn = resolve(str(e.get("name", "")), _field(e, FILE_KEYS), int(ln) if str(ln).isdigit() else None)
                     if fn is not None:
                         seq_id += 1
                     up = next((s for s in reversed(stack) if s["fn"]), None)

@@ -55,30 +55,6 @@ CASES = {
             ("nested-loops", "info", "com.x.OrderService.grid", 24),
         ],
     },
-    "kotlin": {
-        "present": [
-            ("blocking-in-async", "high", "com.x.Prices.refresh", 15),
-            ("blocking-in-async", "high", "com.x.Prices.refresh", 17),
-            ("io-without-timeout", "low", "com.x.Prices.fetch", 11),  # OkHttp 10s defaults
-        ],
-        "absent": [("blocking-in-async", 16)],  # withContext(Dispatchers.IO)
-    },
-    "csharp": {
-        "present": [
-            ("blocking-in-async", "high", "Services.QuoteService.RefreshAsync", 27),
-            ("sync-over-async", "medium", "Services.QuoteService.GetQuote", 18),
-            ("io-in-loop", "medium", "Services.QuoteService.RefreshAsync", 25),
-            ("io-without-timeout", "low", "Services.QuoteService.GetQuoteAsync", 13),
-        ],
-        "absent": [("blocking-in-async", 28)],  # Task.Run
-    },
-    "swift": {
-        "present": [
-            ("blocking-in-async", "medium", "Sources.App.Feed.refresh", 14),  # Data(contentsOf:) file read
-            ("blocking-in-async", "high", "Sources.App.Feed.refresh", 15),
-            ("io-in-loop", "medium", "Sources.App.Feed.refresh", 12),
-        ],
-    },
     "c": {
         "present": [
             ("io-without-timeout", "medium", "fetch::fetch", 5),
@@ -89,25 +65,6 @@ CASES = {
     "cpp": {
         "present": [("nested-loops", "info", "engine::eng::Engine::run", 14)],
         "boundaries": {("engine::eng::Engine::step", "sleep"), ("engine::eng::Engine::step", "wait")},
-    },
-    "ruby": {
-        "present": [
-            ("io-in-loop", "medium", "app.services.SyncOrders.call", 6),
-            ("io-in-loop", "medium", "app.services.SyncOrders.call", 7),
-            ("io-without-timeout", "low", "app.services.SyncOrders.push", 12),
-        ],
-    },
-    "php": {
-        "present": [
-            ("io-in-loop", "medium", "Billing.chargeAll", 13),
-            ("io-in-loop", "medium", "Billing.chargeAll", 14),
-            ("io-without-timeout", "medium", "Billing.charge", 20),
-        ],
-        "absent": [("io-without-timeout", 25)],
-    },
-    "scala": {
-        "present": [("blocking-in-async", "high", "Pricing.slow", 14)],
-        "absent": [("blocking-in-async", 9)],  # Await outside a Future
     },
 }
 
@@ -145,7 +102,7 @@ def test_language(lang, maps):
 
 
 def test_no_high_findings_without_async_support(maps):
-    for lang in ("go", "java", "c", "cpp", "ruby", "php"):
+    for lang in ("go", "java", "c", "cpp"):
         assert not any(f.rule == "blocking-in-async" for f in _load(maps, lang).findings)
 
 

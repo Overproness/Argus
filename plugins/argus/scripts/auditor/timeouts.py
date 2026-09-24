@@ -1,8 +1,8 @@
 """Parse durations out of source text: timeout arguments, deadline wrappers, sleeps.
 
 Returns seconds as float, or None when no duration is recognizable. Units follow
-each API's convention (JS `timeout:` and Kotlin `withTimeout(n)` are
-milliseconds; Python, Ruby, PHP and Swift bare numbers are seconds).
+each API's convention (JS `timeout:` is milliseconds; Python bare numbers are
+seconds).
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _PATTERNS: list[tuple[re.Pattern, object]] = [
     # Rust: Duration::from_secs(2), from_millis(500), from_secs_f64(1.5)
     (re.compile(rf"from_(secs|millis|micros|nanos)(?:_f(?:32|64))?\(\s*{NUM}"),
      lambda m: float(m.group(2)) * {"secs": 1, "millis": 1e-3, "micros": 1e-6, "nanos": 1e-9}[m.group(1)]),
-    # Java/Kotlin: Duration.ofSeconds(10), ofMillis(500); Kotlin 5.seconds / 500.milliseconds
+    # Java: Duration.ofSeconds(10), ofMillis(500)
     (re.compile(rf"of(Seconds|Millis|Minutes|Nanos)\(\s*{NUM}"),
      lambda m: float(m.group(2)) * {"Seconds": 1, "Millis": 1e-3, "Minutes": 60, "Nanos": 1e-9}[m.group(1)]),
     (re.compile(rf"\b{NUM}\s*\.\s*(seconds|milliseconds|minutes|second|millisecond|minute)\b"),
@@ -30,9 +30,6 @@ _PATTERNS: list[tuple[re.Pattern, object]] = [
     (re.compile(rf"{NUM}\s*,\s*TimeUnit\.(SECONDS|MILLISECONDS|MINUTES|MICROSECONDS)"),
      lambda m: float(m.group(1)) * {"SECONDS": 1, "MILLISECONDS": 1e-3, "MINUTES": 60,
                                     "MICROSECONDS": 1e-6}[m.group(2)]),
-    # C#: TimeSpan.FromSeconds(10)
-    (re.compile(rf"From(Seconds|Milliseconds|Minutes)\(\s*{NUM}"),
-     lambda m: float(m.group(2)) * {"Seconds": 1, "Milliseconds": 1e-3, "Minutes": 60}[m.group(1)]),
     # Go: 5 * time.Second, time.Second * 5, time.Duration(5) * time.Second, 500*time.Millisecond
     (re.compile(rf"{NUM}\s*\*\s*time\.(Second|Millisecond|Minute|Microsecond)"),
      lambda m: float(m.group(1)) * {"Second": 1, "Millisecond": 1e-3, "Minute": 60, "Microsecond": 1e-6}[m.group(2)]),
@@ -130,8 +127,8 @@ def sleep_duration(text: str, lang: str = "") -> float | None:
     if not m:
         return None
     v = float(m.group(1))
-    if lang in ("java", "kotlin", "scala", "csharp", "javascript", "typescript") or "delay(" in m.group(0):
-        v /= 1000.0  # Thread.sleep / Thread.Sleep / delay take milliseconds
+    if lang in ("java", "javascript", "typescript") or "delay(" in m.group(0):
+        v /= 1000.0  # Thread.sleep / delay take milliseconds
     elif "usleep" in m.group(0):
         v /= 1e6
     return v

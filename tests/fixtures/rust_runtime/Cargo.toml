@@ -1,0 +1,15 @@
+[package]
+name = "rust_runtime"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rust_runtime"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tracing-chrome = "0.7"

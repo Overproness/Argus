@@ -197,13 +197,15 @@ const t0 = performance.now();
 // Call the function under test here, e.g. `await mod.fetchPrice(url);`
 evidence({{kind: "probe", elapsed_s: (performance.now() - t0) / 1000}});
 """)
-    run = ["node", "--import", "tsx", str(d / "probe.mjs")] if ts else ["node", str(d / "probe.mjs")]
-    return Probe("typescript" if ts else "javascript", d, d / "probe.mjs", run=run, verified=not ts)
+    # `node --import tsx` needs "tsx" resolvable as an ESM package from the probe's directory, which a
+    # global `npm install -g tsx` does not give it. The `tsx` CLI registers the loader itself instead.
+    run = ["tsx", str(d / "probe.mjs")] if ts else ["node", str(d / "probe.mjs")]
+    return Probe("typescript" if ts else "javascript", d, d / "probe.mjs", run=run, verified=True)
 
 
 def _java_classpath(repo: Path) -> list[Path]:
-    return [p for p in (repo / "target" / "classes", repo / "build" / "classes" / "java" / "main",
-                        repo / "build" / "classes" / "kotlin" / "main") if p.is_dir()]
+    return [p for p in (repo / "target" / "classes", repo / "build" / "classes" / "java" / "main")
+           if p.is_dir()]
 
 
 def _java(repo: Path, d: Path, name: str, sources: str = "src/main/java", classpath: list[str] = (), **_) -> Probe:
@@ -229,40 +231,6 @@ public class Probe {
         cp = [str(out)]
     return Probe("java", d, d / "Probe.java", build=build,
                  run=["java", "-cp", os.pathsep.join(cp), str(d / "Probe.java")], verified=True)
-
-
-def _csharp(repo: Path, d: Path, name: str, project: str | None = None, **_) -> Probe:
-    proj = (repo / project) if project else next(iter(sorted(repo.rglob("*.csproj"))), None)
-    if proj is None:
-        raise ValueError(f"no .csproj under {repo}; pass project='path/to/X.csproj'")
-    tfm = re.search(r"<TargetFramework>([^<]+)</TargetFramework>", proj.read_text(encoding="utf8"))
-    _write_once(d / "Probe.csproj", f"""<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>{tfm.group(1) if tfm else "net8.0"}</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>disable</Nullable>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include={json.dumps(str(proj))} />
-  </ItemGroup>
-</Project>
-""")
-    _write_once(d / "Program.cs", """// Argus probe: call the code under test, print @@evidence lines.
-using System.Diagnostics;
-using System.Text.Json;
-
-static void Evidence(object fact) => Console.WriteLine("@@evidence " + JsonSerializer.Serialize(fact));
-
-var url = Environment.GetEnvironmentVariable("ARGUS_FAULT_URL") ?? "";
-var sw = Stopwatch.StartNew();
-// Call the code under test here, e.g. `Demo.Client.Fetch(url);`
-Evidence(new { kind = "probe", elapsed_s = sw.Elapsed.TotalSeconds });
-""")
-    env = {"DOTNET_CLI_TELEMETRY_OPTOUT": "1", "DOTNET_NOLOGO": "1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1"}
-    return Probe("csharp", d, d / "Program.cs",
-                 build=[["dotnet", "build", str(d / "Probe.csproj"), "-nologo", "-v", "q", "-o", str(d / "out")]],
-                 run=["dotnet", str(d / "out" / "Probe.dll")], env=env, verified=True)
 
 
 def _cfam(repo: Path, d: Path, name: str, sources: list[str] = (), includes: list[str] = (),
@@ -329,92 +297,8 @@ func main() {{
 }}
 """)
     exe = d / ("probe" + (".exe" if WIN else ""))
-    return Probe("go", d, d / "main.go", build=[["go", "build", "-mod=mod", "-o", str(exe), "."]], run=[str(exe)])
-
-
-def _script(lang: str, repo: Path, d: Path, name: str, **_) -> Probe:
-    if lang == "ruby":
-        body = f"""# Argus probe: call the code under test, print @@evidence lines.
-require "json"
-$LOAD_PATH.unshift({json.dumps(str(repo / 'lib'))})
-def evidence(fact) = puts("@@evidence " + JSON.generate(fact))
-
-url = ENV.fetch("ARGUS_FAULT_URL", "")
-t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-# Call the code under test here (require the library first).
-evidence({{kind: "probe", elapsed_s: Process.clock_gettime(Process::CLOCK_MONOTONIC) - t0}})
-"""
-        _write_once(d / "probe.rb", body)
-        return Probe("ruby", d, d / "probe.rb", run=["ruby", str(d / "probe.rb")])
-    body = f"""<?php
-// Argus probe: call the code under test, print @@evidence lines.
-require {json.dumps(str(repo / 'vendor' / 'autoload.php'))};
-function evidence(array $fact): void {{ echo "@@evidence " . json_encode($fact) . "\\n"; }}
-
-$url = getenv("ARGUS_FAULT_URL") ?: "";
-$t0 = hrtime(true);
-// Call the code under test here.
-evidence(["kind" => "probe", "elapsed_s" => (hrtime(true) - $t0) / 1e9]);
-"""
-    _write_once(d / "probe.php", body)
-    return Probe("php", d, d / "probe.php", run=["php", str(d / "probe.php")])
-
-
-def _jvm_script(lang: str, repo: Path, d: Path, name: str, classpath: list[str] = (), **_) -> Probe:
-    cp = [str(p) for p in classpath] or [str(p) for p in _java_classpath(repo)]
-    if lang == "kotlin":
-        _write_once(d / "probe.kt", """// Argus probe: call the code under test, print @@evidence lines.
-fun evidence(json: String) = println("@@evidence $json")
-
-fun main() {
-    val url = System.getenv("ARGUS_FAULT_URL") ?: ""
-    val t0 = System.nanoTime()
-    // Call the code under test here.
-    evidence("{\\"kind\\": \\"probe\\", \\"elapsed_s\\": ${(System.nanoTime() - t0) / 1e9}}")
-}
-""")
-        jar = d / "probe.jar"
-        return Probe("kotlin", d, d / "probe.kt",
-                     build=[["kotlinc", str(d / "probe.kt"), "-include-runtime", "-cp", os.pathsep.join(cp), "-d", str(jar)]],
-                     run=["java", "-cp", os.pathsep.join([str(jar), *cp]), "ProbeKt"])
-    _write_once(d / "probe.scala", '''// Argus probe: call the code under test, print @@evidence lines.
-@main def probe(): Unit =
-  def evidence(json: String): Unit = println("@@evidence " + json)
-  val url = sys.env.getOrElse("ARGUS_FAULT_URL", "")
-  val t0 = System.nanoTime()
-  // Call the code under test here.
-  evidence(s"""{"kind": "probe", "elapsed_s": ${(System.nanoTime() - t0) / 1e9}}""")
-''')
-    return Probe("scala", d, d / "probe.scala",
-                 run=["scala-cli", "run", str(d / "probe.scala"), "--classpath", os.pathsep.join(cp)])
-
-
-def _swift(repo: Path, d: Path, name: str, product: str = "", **_) -> Probe:
-    _write_once(d / "Package.swift", f"""// swift-tools-version:5.7
-import PackageDescription
-
-let package = Package(
-    name: "ArgusProbe",
-    dependencies: [.package(path: {json.dumps(repo.as_posix())})],
-    targets: [.executableTarget(name: "ArgusProbe", dependencies: [{json.dumps(product) if product else ''}])]
-)
-""")
-    _write_once(d / "Sources" / "ArgusProbe" / "main.swift", """// Argus probe: call the code under test, print @@evidence lines.
-import Foundation
-
-func evidence(_ fact: [String: Any]) {
-    let data = try! JSONSerialization.data(withJSONObject: fact)
-    print("@@evidence " + String(data: data, encoding: .utf8)!)
-}
-
-let url = ProcessInfo.processInfo.environment["ARGUS_FAULT_URL"] ?? ""
-let t0 = Date()
-// Call the code under test here (import the library product first).
-evidence(["kind": "probe", "elapsed_s": Date().timeIntervalSince(t0)])
-""")
-    return Probe("swift", d, d / "Sources" / "ArgusProbe" / "main.swift",
-                 build=[["swift", "build", "--package-path", str(d)]],
-                 run=["swift", "run", "--package-path", str(d), "--skip-build", "ArgusProbe"])
+    return Probe("go", d, d / "main.go", build=[["go", "build", "-mod=mod", "-o", str(exe), "."]], run=[str(exe)],
+                verified=True)
 
 
 SCAFFOLDS = {
@@ -422,24 +306,18 @@ SCAFFOLDS = {
     "javascript": _js,
     "typescript": lambda repo, d, name, **kw: _js(repo, d, name, ts=True, **kw),
     "java": _java,
-    "csharp": _csharp,
     "c": _cfam,
     "cpp": lambda repo, d, name, **kw: _cfam(repo, d, name, cpp=True, **kw),
     "go": _go,
-    "ruby": lambda repo, d, name, **kw: _script("ruby", repo, d, name, **kw),
-    "php": lambda repo, d, name, **kw: _script("php", repo, d, name, **kw),
-    "kotlin": lambda repo, d, name, **kw: _jvm_script("kotlin", repo, d, name, **kw),
-    "scala": lambda repo, d, name, **kw: _jvm_script("scala", repo, d, name, **kw),
-    "swift": _swift,
 }
-VERIFIED = {"rust", "javascript", "java", "csharp", "c", "cpp"}  # exercised by Argus's own tests
+VERIFIED = {"rust", "javascript", "typescript", "java", "c", "cpp", "go"}  # exercised by Argus's own tests
 
 
 def scaffold(lang: str, name: str, repo: Path | None = None, out_dir: Path | None = None, **opts) -> Probe:
     """Create (once) a probe side project for `lang` and return how to build and run it.
 
     Options by language: rust crate=, deps=[...]; javascript/typescript module=; java sources=, classpath=[...];
-    csharp project=; c/cpp sources=[...], includes=[...], flags=[...]; kotlin/scala classpath=[...]; swift product=.
+    c/cpp sources=[...], includes=[...], flags=[...].
     """
     if lang not in SCAFFOLDS:
         raise ValueError(f"no probe scaffold for {lang}; use black-box mode (run_target on the real program)")

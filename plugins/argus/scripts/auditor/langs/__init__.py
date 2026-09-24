@@ -1,12 +1,12 @@
 """Registry of language specs, keyed by file extension."""
 from pathlib import Path
 
-from . import cfamily, csharp, golang, javascript, jvm, patterns, php, python, ruby, rust, swift
+from . import cfamily, golang, javascript, jvm, patterns, python, rust
 from .base import LangSpec
 
 SPECS: list[LangSpec] = [
     rust.SPEC, python.SPEC, javascript.SPEC, javascript.TS_SPEC, javascript.TSX_SPEC, golang.SPEC,
-    jvm.JAVA, jvm.KOTLIN, jvm.SCALA, csharp.SPEC, swift.SPEC, cfamily.C, cfamily.CPP, ruby.SPEC, php.SPEC,
+    jvm.JAVA, cfamily.C, cfamily.CPP,
 ]
 for _s in SPECS:
     if patterns.pattern_rules not in _s.hooks:

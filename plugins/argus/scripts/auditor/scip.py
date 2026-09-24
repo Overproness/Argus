@@ -39,23 +39,18 @@ INDEXERS = {
                              "rustup component add rust-analyzer", verified=True),
     "scip-python": Indexer(("scip-python", "index", ".", "--project-name", "{name}", "--output", "{out}"),
                            ("pyproject.toml", "setup.py", "setup.cfg", "requirements.txt"),
-                           "npm install -g @sourcegraph/scip-python"),
+                           "npm install -g @sourcegraph/scip-python", verified=True),
     "scip-typescript": Indexer(("scip-typescript", "index", "--infer-tsconfig", "--output", "{out}"),
                                ("tsconfig.json", "package.json"),
-                               "npm install -g @sourcegraph/scip-typescript"),
-    "scip-go": Indexer(("scip-go", "--output", "{out}"), ("go.mod",),
-                       "go install github.com/sourcegraph/scip-go/cmd/scip-go@latest"),
+                               "npm install -g @sourcegraph/scip-typescript", verified=True),
+    "scip-go": Indexer(("scip-go", "index", "--output", "{out}"), ("go.mod",),
+                       "go install github.com/scip-code/scip-go/cmd/scip-go@latest", verified=True),
     "scip-java": Indexer(("scip-java", "index", "--output", "{out}"),
                          ("pom.xml", "build.gradle", "build.gradle.kts", "build.sbt"),
                          "see https://sourcegraph.github.io/scip-java/ (coursier bootstrap)"),
-    "scip-dotnet": Indexer(("scip-dotnet", "index", "--output", "{out}"), ("*.sln", "*.csproj"),
-                           "dotnet tool install --global scip-dotnet"),
     "scip-clang": Indexer(("scip-clang", "--compdb-path=compile_commands.json", "--index-output-path={out}"),
                           ("compile_commands.json",),
                           "download from https://github.com/sourcegraph/scip-clang/releases (needs compile_commands.json)"),
-    "scip-ruby": Indexer(("scip-ruby", "--index-file", "{out}", "."), ("Gemfile",),
-                         "download from https://github.com/sourcegraph/scip-ruby/releases"),
-    "scip-php": Indexer(("scip-php",), ("composer.json",), "composer require --dev davidrjenni/scip-php"),
 }
 
 
@@ -178,8 +173,6 @@ def run_indexers(repo: Path, indexers: set[str], out_dir: Path, timeout: int = 1
             except subprocess.TimeoutExpired:
                 log.append(f"fail {key} in {rel or '.'}: timed out after {timeout}s")
                 continue
-            if key == "scip-php" and (root / "index.scip").exists():
-                shutil.move(root / "index.scip", out)
             if r.returncode != 0 or not out.exists():
                 tail = (r.stderr or r.stdout).strip().splitlines()[-3:]
                 log.append(f"fail {key} in {rel or '.'}: exit {r.returncode} {' | '.join(tail)}")

@@ -27,12 +27,8 @@ def got(m, rule):
     ("fetch(u, { signal: AbortSignal.timeout(1500) })", "javascript", 1.5),
     ("ctx, cancel := context.WithTimeout(ctx, 5*time.Second)", "go", 5),
     ("HttpRequest.newBuilder().timeout(Duration.ofSeconds(10))", "java", 10),
-    (".connectTimeout(10, TimeUnit.SECONDS)", "kotlin", 10),
-    ("withTimeout(5000) { fetch() }", "kotlin", 5),
-    ("cts.CancelAfter(TimeSpan.FromSeconds(3))", "csharp", 3),
+    (".connectTimeout(10, TimeUnit.SECONDS)", "java", 10),
     ("curl_easy_setopt(c, CURLOPT_TIMEOUT, 5L);", "c", 5),
-    ("$client->post('u', ['timeout' => 5])", "php", 5),
-    ("req.timeoutInterval = 12", "swift", 12),
     ("no timeout here", "python", None),
 ])
 def test_parse_duration(text, lang, want):
@@ -106,16 +102,8 @@ MORE_LANGS = {
     "javascript": [("retry-without-backoff", "quotes.fetchQuote", 4)],
     "typescript": [("retry-without-backoff", "quotes.fetchQuote", 4)],
     "java": [("retry-without-backoff", "demo.Poller.fetch", 14), ("hang-reaches-entry", "demo.Poller.main", 24)],
-    "kotlin": [("deadline-cannot-preempt", "demo.Prices.guarded", 14)],  # withTimeout around a blocking call
-    "scala": [("retry-without-backoff", "Quotes.fetch", 6)],  # sttp via a wildcard import
-    "csharp": [("deadline-cannot-preempt", "Services.Feed.Guarded", 34),  # WaitAsync around Thread.Sleep
-               ("retry-without-backoff", "Services.Feed.Quote", 13)],
-    "swift": [("retry-without-backoff", "Sources.App.Quotes.fetch", 7)],
     "c": [("retry-without-backoff", "fetch::fetch", 4)],  # CURLE_OK check counts as error handling
     "cpp": [("retry-without-backoff", "fetch::fetch", 6)],
-    "ruby": [("retry-without-backoff", "app.Quotes.fetch", 4),  # rescue ... retry if (tries += 1) < 3
-             ("unbounded-retry", "app.Quotes.fetch_forever", 14)],  # rescue; sleep; retry
-    "php": [("retry-without-backoff", "Quotes.fetch", 13)],  # for ($i = 0; $i < 3; $i++)
 }
 
 

@@ -1,14 +1,14 @@
 ---
 name: audit-trace
 description: >-
-  Run a program, test suite or server in any language under argus runtime observation,
-  and turn static findings from audit-map into evidence. Python 3.12+ is traced function
-  by function automatically, and Node (JavaScript, TypeScript) is profiled automatically
-  (V8 sampling profile plus exact call counts). Every language can send OpenTelemetry spans
-  to the argus receiver (--otlp; Java, Kotlin and Scala via the Java agent, .NET, Node, Go,
-  Rust, Ruby and PHP via their OpenTelemetry SDKs), have heartbeat gaps in its output turned
+  Run a program, test suite or server in Rust, Python, JS/TS, Go, Java or C/C++ under argus
+  runtime observation, and turn static findings from audit-map into evidence. Python 3.12+ is
+  traced function by function automatically, and Node (JavaScript, TypeScript) is profiled
+  automatically (V8 sampling profile plus exact call counts). Every language can send
+  OpenTelemetry spans to the argus receiver (--otlp; Java via the Java agent, Node, Go and
+  Rust via their OpenTelemetry SDKs), have heartbeat gaps in its output turned
   into stalls (--heartbeat), or import a profile recorded elsewhere (trace-import: V8
-  .cpuprofile, speedscope from py-spy, rbspy, dotnet-trace). It reports event-loop stalls
+  .cpuprofile, speedscope from py-spy, or a Rust tracing-chrome trace). It reports event-loop stalls
   with their call stack, N+1 fan-out counts, observed external calls with latency and
   errors, recursion depth, O(n^k) complexity fits and scaling projections. Use after
   audit-map when findings need evidence, when the user asks "does this actually block / how
@@ -29,7 +29,8 @@ reports what happened, joined to each finding. You interpret; do not invent.
 | Node profiler | JavaScript, TypeScript on Node | event-loop stalls with the stack and the blocking call (`spawnSync (sampled leaf)`), sampled durations, exact call counts from V8 coverage | none (automatic for `node`, `npm`, `npx`, `yarn`, `pnpm`, `tsx`, `ts-node`); `--node` forces it, `--no-node` turns it off |
 | OpenTelemetry | any language with an OTel agent or SDK | spans mapped to repo functions (by code attributes or names), plus external calls (HTTP, DB, RPC, messaging) with latency and errors | `--otlp` |
 | Heartbeat | any program that prints periodically (a tick log, a request log) | stalls: gaps between those lines, attributed to the deepest span covering each gap when spans exist | `--heartbeat REGEX` |
-| Imported profile | anything that writes a V8 `.cpuprofile` (Chrome or Deno DevTools) or speedscope JSON (`py-spy record -f speedscope`, `rbspy record --format speedscope`, `dotnet-trace convert --format Speedscope`) | sampled durations; stalls only when the profile has idle samples; exact durations from evented speedscope profiles | `trace-import --profile FILE` |
+| Imported profile | anything that writes a V8 `.cpuprofile` (Chrome or Deno DevTools) or speedscope JSON (`py-spy record -f speedscope --idle`) | sampled durations; stalls only when the profile has idle samples; exact durations from evented speedscope profiles | `trace-import --profile FILE` |
+| Rust chrome trace | a `tracing-chrome` recording (one span pair per poll) | per-poll self time; a long poll on an async function's stack is a stall | `trace-import --chrome FILE` |
 
 The channels combine. `--otlp --heartbeat "tick"` gives stalls attributed to
 functions in any language. On Node, the profiler runs alongside `--otlp` and
@@ -49,11 +50,10 @@ instrumented. Prefer ways that need no code change:
 
 | Language | How to get spans (no code change first) | Spans for the repo's own functions |
 |---|---|---|
-| Java, Kotlin, Scala | `java -javaagent:opentelemetry-javaagent.jar ...` (from the opentelemetry-java-instrumentation releases) | automatic: `trace --otlp` sets `OTEL_INSTRUMENTATION_METHODS_INCLUDE` to the classes and methods in the map's JVM findings and entry points (set it yourself to override) |
-| C# / .NET | OpenTelemetry .NET automatic instrumentation (its install script sets the profiler variables) | HTTP and DB client spans are automatic; functions need an `ActivitySource` in code |
+| Java | `java -javaagent:opentelemetry-javaagent.jar ...` (from the opentelemetry-java-instrumentation releases) | automatic: `trace --otlp` sets `OTEL_INSTRUMENTATION_METHODS_INCLUDE` to the classes and methods in the map's JVM findings and entry points (set it yourself to override) |
 | JavaScript / TypeScript | `node --require @opentelemetry/auto-instrumentations-node/register app.js` | client spans are automatic; functions come from the Node profiler |
 | Python | not needed: the built-in tracer records every function. Add `opentelemetry-instrument` for client spans | the built-in tracer |
-| Go, Rust, Ruby, PHP, Swift, C/C++ | the OpenTelemetry SDK in code (Rust: `tracing-opentelemetry` if the repo uses `tracing`; Go: the SDK or eBPF auto-instrumentation) | spans the code already creates |
+| Go, Rust, C/C++ | the OpenTelemetry SDK in code (Rust: `tracing-opentelemetry` if the repo uses `tracing`; Go: the SDK or eBPF auto-instrumentation) | spans the code already creates |
 
 Never add instrumentation code or dependencies to the repo without the user's
 explicit consent. If the repo has no OpenTelemetry and the language needs code
@@ -80,7 +80,7 @@ callees count polls and can overstate: check them against the code.
 Evidence is only as good as the code the workload exercises. In order of preference:
 
 1. The test suite (`-- python -m pytest tests -x -q`, `-- cargo test`,
-   `-- mvn -q test`, `-- npm test`, `-- dotnet test`, `-- go test ./...`).
+   `-- mvn -q test`, `-- npm test`, `-- go test ./...`).
 2. A script, CLI or entry point with realistic inputs.
 3. A dev server plus a load generator, started in the same command.
 

@@ -65,7 +65,7 @@ def default_module(rel: PurePath, file_is_module: bool = True) -> tuple[str, ...
     parts = list(rel.with_suffix("").parts)
     if "src" in parts:
         parts = parts[len(parts) - parts[::-1].index("src"):]
-    if len(parts) > 2 and parts[0] in ("main", "test") and parts[1] in ("java", "kotlin", "scala"):
+    if len(parts) > 2 and parts[0] in ("main", "test") and parts[1] == "java":
         parts = parts[2:]
     stem = parts.pop() if parts else None
     if file_is_module and stem not in (None, "__init__", "index", "mod", "main", "lib"):
@@ -164,21 +164,18 @@ def _arity(spec: LangSpec, node: Node, in_container: bool) -> tuple[tuple[int, f
         if inner[:1] in "([|" and inner[-1:] in ")]|":
             inner = inner[1:-1]
         segs = _split_params(inner)
-    elif spec.name == "swift":
-        segs = [text(c) for c in node.named_children if c.type == "parameter"]
     else:
         return None, False
     if segs == ["void"]:
         segs = []
     takes_self = False
-    if segs and ((_SELF_PARAM.match(segs[0]) and (spec.name == "rust" or (spec.name == "python" and in_container)))
-                 or (spec.name == "csharp" and segs[0].startswith("this "))):  # C# extension methods
+    if segs and _SELF_PARAM.match(segs[0]) and (spec.name == "rust" or (spec.name == "python" and in_container)):
         segs, takes_self = segs[1:], True
-    segs = [s for s in segs if s not in ("*", "/") and not s.startswith("&")]  # py separators, ruby &block
+    segs = [s for s in segs if s not in ("*", "/")]  # py separators
     variadic = any(_VARIADIC.search(s) for s in segs)
 
     def optional(s):
-        return bool(_DEFAULT.search(s)) or (spec.name == "ruby" and re.match(r"^\w+:", s) is not None)
+        return bool(_DEFAULT.search(s))
 
     required = sum(1 for s in segs if not optional(s) and not _VARIADIC.search(s))
     lo, hi = required, (float("inf") if variadic else len(segs))
@@ -195,16 +192,8 @@ def _argc(call: Node) -> int | None:
         args = next((c for c in call.named_children if c.type in ARG_CONTAINERS + ("call_suffix",)), None)
     if args is None:
         return 0 if call.type in ("method_invocation", "invocation_expression") else None
-    if args.type == "call_suffix":  # Kotlin/Swift: value arguments plus trailing lambda
-        n = 0
-        for c in args.named_children:
-            if c.type == "value_arguments":
-                n += sum(1 for a in c.named_children if a.type == "value_argument")
-            elif c.type in ("annotated_lambda", "lambda_literal"):
-                n += 1
-        return n
     if args.type not in ARG_CONTAINERS:
-        return 1  # `f(x for x in y)`, Scala `Future { ... }`
+        return 1  # `f(x for x in y)`
     kids = [c for c in args.named_children if c.type != "comment"]
     if any(c.type in SPREAD_ARGS or text(c).lstrip().startswith(("...", "*")) for c in kids):
         return None
@@ -242,9 +231,6 @@ _HANDLES = re.compile(
     r"err\s*[!=]=\s*nil|\.catch\(|\.isFailure|\.onFailure|\bresult\.err\b|"
     r"\b(CURLE_OK|SQLITE_OK|EAGAIN|EINTR|errno)\b"  # C return-code checks
 )
-# Ruby: `rescue ... retry if (tries += 1) < 3` re-runs the begin block.
-_RUBY_RETRY = re.compile(r"\brescue\b[\s\S]*?\bretry\b[^\n]*")
-_RUBY_TRIES = re.compile(r"\(?\s*(\w+)\s*\+=\s*1\s*\)?\s*<=?\s*(\d+)|\b(\w+)\s*<\s*(\d+)")
 _SLEEPY = re.compile(r"(?i)(^|\.)(sleep|usleep|delay|sleep_for|sleep_until|backoff|wait_exponential)$")
 _EXPO = re.compile(r"\*\*|\bpow\(|\.pow\(|<<|\*=\s*2|\bexponential|\bexpo\b|\bbackoff|checked_mul|saturating_mul|"
                    r"Math\.pow|math\.Pow|\*\s*2\b")
@@ -255,10 +241,10 @@ _COLLECTION = re.compile(
 _COUNT_PATTERNS = [
     # Python: for i in range(5) / range(1, 5)
     (re.compile(r"\bin\s+range\(\s*(?:([\w.]+)\s*,\s*)?([\w.]+)\s*[,)]"), "range"),
-    # Rust / Swift / Kotlin / Scala: 0..5, 0..=5, 0..<5, 0 until 5, 1 to 5
+    # Rust: 0..5, 0..=5, 0..<5
     (re.compile(r"\bin\s+\(?\s*([\w.]+)\s*(\.\.=|\.\.<|\.\.|until|to)\s*([\w.]+)|<-\s*([\w.]+)\s*(until|to)\s*([\w.]+)"),
      "rangeop"),
-    # C-like / Go / JS / Java / PHP: i = 0; i < 5;   ($i in PHP)
+    # C-like / Go / JS / Java: i = 0; i < 5;
     (re.compile(r"(?:=|:=)\s*(\d+)\s*;\s*\$?\w+\s*(<=?)\s*([\w.$]+)\s*;"), "cfor"),
 ]
 _POLICY_BOUND = re.compile(
@@ -320,17 +306,6 @@ def _retry_decorator(text_: str) -> tuple[int | None, str] | None:
         backoff = "exponential"  # backoff.on_exception always takes a wait generator
     else:
         backoff = "none"
-    return attempts, backoff
-
-
-def _ruby_retry(body: str) -> tuple[int | None, str] | None:
-    m = _RUBY_RETRY.search(body)
-    if not m:
-        return None
-    clause = m.group(0)
-    t = _RUBY_TRIES.search(clause)
-    attempts = int(t.group(2) or t.group(4)) if t else None  # a bare `retry` retries forever
-    backoff = ("exponential" if _EXPO.search(clause) else "fixed") if re.search(r"\bsleep\b", clause) else "none"
     return attempts, backoff
 
 
@@ -487,8 +462,6 @@ class FileExtractor:
         else:
             fn.arity, fn.takes_self = _arity(spec, node, cont is not None)
         fn.retry = _retry_decorator(prefix + "\n" + header)
-        if spec.name == "ruby" and fn.retry is None and body is not None:
-            fn.retry = _ruby_retry(text(body))
         scan = body if body is not None else node
         nesting = 0
         stack = [(scan, 0)]
@@ -516,7 +489,7 @@ class FileExtractor:
 
     def _loop_info(self, n: Node) -> LoopInfo:
         body = n.child_by_field_name("body")
-        if body is None:  # Swift/Kotlin: the loop body is a plain child, not a field
+        if body is None:  # some grammars: the loop body is a plain child, not a field
             body = next((c for c in reversed(n.named_children) if c.type in LOOP_BODIES), None)
         header = _header(n, body) if body is not None else text(n).split("\n", 1)[0]
         body_text = text(body)[:8000] if body is not None else ""

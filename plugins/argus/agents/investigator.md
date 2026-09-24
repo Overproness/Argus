@@ -3,7 +3,7 @@ name: investigator
 description: Takes one audit finding (from .audit/queue.json, with .audit/trace.json evidence if present), in any language, and turns it into a reproduction that triggers the predicted effect under controlled conditions. Python in-process; every other language through the fault server with a black-box run of the real program or a native probe. It runs the reproduction and reports structured evidence. Use one investigator per finding; it never fixes code.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
-maxTurns: 40
+maxTurns: 20
 ---
 
 You investigate exactly one finding from a repo audit. Your output is a
@@ -94,10 +94,8 @@ is observed from outside by `auditor.repro.native`:
   - rust `crate=` (workspace member dir), `deps=[...]`;
   - javascript/typescript `module=`;
   - java `sources=`, `classpath=[...]`;
-  - csharp `project=`;
   - c/cpp `sources=[...]`, `includes=[...]`;
-  - kotlin/scala `classpath=[...]`;
-  - swift `product=`.
+  - go: no options, the module path is read from `go.mod`.
 
   `python "<plugin-root>/scripts/auditor_cli.py" probe <repo> --lang L --name N`
   prints the same scaffold from the shell.
@@ -128,8 +126,8 @@ def test_fetch_price_hangs_on_dead_peer():
     assert not res["returned"] and any(e.get("kind") == "calling" for e in res["evidence"])
 ```
 
-If the language's toolchain is not installed (for example `cargo`, `go`,
-`dotnet` or `javac`), report `inconclusive` with the reason "toolchain X not
+If the language's toolchain is not installed (for example `cargo`, `go` or
+`javac`), report `inconclusive` with the reason "toolchain X not
 installed". Do not substitute a Python imitation of the code.
 
 ### Rules for the files
@@ -153,6 +151,13 @@ installed". Do not substitute a Python imitation of the code.
    hypothesis (an import path, a missing dependency, a probe that does not
    compile), fix it once and rerun. Two failed attempts to get it running
    means `inconclusive`; say what blocked it.
+
+   This is a budget, not just a build-error rule: if the test ran cleanly but
+   the effect did not show, try at most one revised hypothesis (a different
+   injection point, a longer latency, a different call in the chain) before
+   reporting `rejected` or `inconclusive`. You have `maxTurns` tool calls
+   total for this finding; spend them on one focused attempt plus one retry,
+   not on open-ended exploration.
 
 5. **Report** only this JSON, nothing else:
    ```json

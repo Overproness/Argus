@@ -200,6 +200,29 @@ def test_javascript_probe_event_loop_stall_and_hang(tmp_path):
     assert hung["returned"] is False and kinds(hung, "calling") and not kinds(hung, "result")
 
 
+@pytest.mark.skipif(not (has("node") and has("tsx")), reason="node/tsx not installed")
+def test_typescript_probe_event_loop_stall_and_hang(tmp_path):
+    repo = copy(tmp_path, "ts_lib")
+    probe = native.scaffold("typescript", "client", repo=repo, module="client.ts")
+    assert kinds(native.run_probe(probe), "probe")
+    mod = (repo / "client.ts").as_uri()
+    probe.source.write_text(
+        f'const mod = await import("{mod}");\n'
+        "const t = setInterval(() => console.log('tick'), 20);\n"
+        "setTimeout(() => mod.crunch(400), 100);\n"
+        "setTimeout(() => clearInterval(t), 800);\n")
+    stall = native.run_probe(probe, heartbeat=r"^tick", timeout=20)
+    assert stall["returned"] and stall["max_heartbeat_gap_s"] >= 0.35  # the loop froze for crunch(400)
+    probe.source.write_text(
+        f'const mod = await import("{mod}");\n'
+        'console.log("@@evidence " + JSON.stringify({kind: "calling"}));\n'
+        "await mod.fetchPrice(process.env.ARGUS_FAULT_URL);\n"
+        'console.log("@@evidence " + JSON.stringify({kind: "result"}));\n')
+    with fault_server(hang=True) as srv:
+        hung = native.run_probe(probe, env={"ARGUS_FAULT_URL": srv.url}, timeout=3)
+    assert hung["returned"] is False and kinds(hung, "calling") and not kinds(hung, "result")
+
+
 JAVA_PROBE = r'''
 public class Probe {
     public static void main(String[] args) throws Exception {
@@ -223,25 +246,53 @@ def test_java_probe_hang(tmp_path):
     assert hung["returned"] is False and kinds(hung, "calling") and not kinds(hung, "result")
 
 
-CS_PROBE = r'''
-Console.WriteLine("@@evidence {\"kind\": \"calling\"}");
-Demo.Client.Fetch(Environment.GetEnvironmentVariable("ARGUS_FAULT_URL"));
-Console.WriteLine("@@evidence {\"kind\": \"result\"}");
+GO_PROBE = r'''
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+
+	fixture "argus/fixture/goclient"
+)
+
+func evidence(fact map[string]any) {
+	b, _ := json.Marshal(fact)
+	fmt.Println("@@evidence " + string(b))
+}
+
+func main() {
+	mode := os.Getenv("MODE")
+	url := os.Getenv("ARGUS_FAULT_URL")
+	evidence(map[string]any{"kind": "calling"})
+	var err error
+	if mode == "retry" {
+		_, err = fixture.FetchWithRetries(url, 3)
+	} else {
+		_, err = fixture.Fetch(url)
+	}
+	evidence(map[string]any{"kind": "result", "ok": err == nil})
+}
 '''
 
 
-@pytest.mark.skipif(not has("dotnet"), reason=".NET SDK not installed")
-def test_csharp_probe_hang(tmp_path):
-    repo = copy(tmp_path, "csharp_lib")
-    probe = native.scaffold("csharp", "client", repo=repo)
-    # Lib.csproj sits at the repo root: this build also proves its default globs skip .audit/.
+@pytest.mark.skipif(not has("go"), reason="go not installed")
+def test_go_probe_hang_and_retry_burst(tmp_path):
+    repo = copy(tmp_path, "go_lib")
+    probe = native.scaffold("go", "client", repo=repo)
     native.build_probe(probe)
-    assert kinds(native.run_probe(probe, timeout=60), "probe")
-    probe.source.write_text(CS_PROBE)
+    assert kinds(native.run_probe(probe, timeout=60), "probe")  # the untouched template runs
+    probe.source.write_text(GO_PROBE)
     native.build_probe(probe)
     with fault_server(hang=True) as srv:
-        hung = native.run_probe(probe, env={"ARGUS_FAULT_URL": srv.url}, timeout=6)
+        hung = native.run_probe(probe, env={"ARGUS_FAULT_URL": srv.url, "MODE": "once"}, timeout=8)
     assert hung["returned"] is False and kinds(hung, "calling") and not kinds(hung, "result")
+    with fault_server(reset=True) as srv:
+        burst = native.run_probe(probe, env={"ARGUS_FAULT_URL": srv.url, "MODE": "retry"}, timeout=20)
+        s = srv.summary()
+    assert burst["returned"] and kinds(burst, "result")[0]["ok"] is False
+    assert s["connections"] == 3 and s["max_gap_s"] < 0.5  # three attempts, no backoff
 
 
 C_PROBE = r'''
@@ -308,7 +359,9 @@ def test_c_probe_quadratic_scaling(tmp_path):
     probe.source.write_text(C_PROBE)
     native.build_probe(probe)
     fit = _scaling(native.run_probe(probe, timeout=120))
-    assert fit is not None and 1.6 <= fit.exponent <= 2.6, fit
+    # quadratic is 2.0; 1.4 still cleanly rejects linear (~1.0) and n log n (~1.1) while tolerating timer
+    # noise at sub-millisecond sizes, which under a loaded run once fitted a real quadratic at 1.59
+    assert fit is not None and 1.4 <= fit.exponent <= 2.6, fit
 
 
 @pytest.mark.skipif(not has("g++"), reason="g++ not installed")
@@ -320,17 +373,17 @@ def test_cpp_probe_quadratic_scaling(tmp_path):
     probe.source.write_text(CPP_PROBE)
     native.build_probe(probe)
     fit = _scaling(native.run_probe(probe, timeout=120))
-    assert fit is not None and 1.6 <= fit.exponent <= 2.6, fit
+    # quadratic is 2.0; 1.4 still cleanly rejects linear (~1.0) and n log n (~1.1) while tolerating timer
+    # noise at sub-millisecond sizes, which under a loaded run once fitted a real quadratic at 1.59
+    assert fit is not None and 1.4 <= fit.exponent <= 2.6, fit
 
 
-def test_unverified_scaffolds_render(tmp_path):
-    """Languages without a toolchain here still get a well-formed side project (verified in CI later)."""
+def test_go_module_replace_directive_renders_without_the_toolchain(tmp_path):
+    """The go.mod templating (module name, replace directive) needs no `go` binary to check."""
     (tmp_path / "go.mod").write_text("module example.com/svc\n\ngo 1.22\n")
-    (tmp_path / "lib").mkdir()
-    for lang in ("go", "ruby", "php", "kotlin", "scala", "swift", "typescript"):
-        p = native.scaffold(lang, "x", repo=tmp_path, **({"module": "index.ts"} if lang == "typescript" else {}))
-        assert p.source.exists() and p.run and not p.verified
-        assert "@@evidence" in p.source.read_text(encoding="utf8")
+    p = native.scaffold("go", "x", repo=tmp_path)
+    assert p.source.exists() and p.run and p.verified
+    assert "@@evidence" in p.source.read_text(encoding="utf8")
     assert "replace example.com/svc =>" in (tmp_path / ".audit/repros/native/go/x/go.mod").read_text()
     with pytest.raises(ValueError, match="black-box"):
         native.scaffold("cobol", "x", repo=tmp_path)

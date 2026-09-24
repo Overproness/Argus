@@ -87,13 +87,18 @@ def test_budget_and_round_caps_stop_the_loop(audit):
 
 
 def test_every_language_is_queued_with_its_harness(tmp_path):
-    for lang, want in (("rust", "native probe or black-box"), ("go", "native probe (template not yet verified")):
+    for lang, want in (("rust", "native probe or black-box"), ("go", "native probe or black-box")):
         repo = tmp_path / lang
         shutil.copytree(FIXTURES / "effects" / lang, repo)
         report.write(RepoMap(repo).load(), repo / ".audit")
         q = orchestrate.queue(repo / ".audit", {"total": 3, "per_round": 3})
         assert q["items"] and all(it["lang"] == lang and it["harness"].startswith(want) for it in q["items"])
         assert not any("harness" in s["reason"] for s in q["skipped"])
+
+
+def test_harness_for_python_and_unscaffolded_languages():
+    assert orchestrate.harness_for("python") == "in-process (repro/harness.py), or black-box"
+    assert orchestrate.harness_for("cobol") == "black-box"  # no scaffold: falls back to black-box only
 
 
 def test_cli_round_trip(tmp_path):

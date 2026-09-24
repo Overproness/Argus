@@ -28,6 +28,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 REQS = Path(__file__).resolve().parent.parent / "requirements.txt"
 
+import bootstrap  # noqa: E402
+
+bootstrap.ensure_dependencies()  # a plain `python3` may lack tree-sitter and friends: use (or build) a private venv
+
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="auditor")
@@ -64,7 +68,7 @@ def main() -> int:
     ti.add_argument("--otlp-file", type=Path, action="append", default=[],
                     help="collector file-exporter output, an OTLP JSON document, or raw OTLP protobuf (repeatable)")
     ti.add_argument("--profile", type=Path, action="append", default=[],
-                    help="a V8 .cpuprofile or a speedscope JSON (py-spy, rbspy, dotnet-trace, ...) (repeatable)")
+                    help="a V8 .cpuprofile or a speedscope JSON (py-spy, ...) (repeatable)")
     ti.add_argument("--chrome", type=Path, action="append", default=[],
                     help="Chrome trace-event JSON, e.g. Rust tracing-chrome output (repeatable)")
     ti.add_argument("--coverage", type=Path, action="append", default=[],

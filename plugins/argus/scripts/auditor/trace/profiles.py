@@ -2,7 +2,7 @@
 
 Inputs (dropped into .audit/trace/ by `trace --node` or `trace-import --profile/--coverage`):
   V8 CPU profile (.cpuprofile)   Node (--cpu-prof), Deno, Chrome and Electron DevTools
-  speedscope JSON                sampled or evented; exported by py-spy, rbspy, dotnet-trace and speedscope itself
+  speedscope JSON                sampled or evented; exported by py-spy and speedscope itself
   V8 coverage (NODE_V8_COVERAGE) exact per-function call counts
 
 A sampled profile is a timeline of stacks. From it:

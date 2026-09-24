@@ -25,9 +25,6 @@ RULES: dict[str, tuple[str, str, dict[str, re.Pattern]]] = {
         "rust": _r(r"\bunbounded_channel\s*\(|\bunbounded\s*\(\s*\)|\bstd::sync::mpsc::channel\s*(::<[^>]*>)?\s*\("),
         "python": _r(r"\b(asyncio\.)?(Priority|Lifo)?Queue\s*\(\s*(maxsize\s*=\s*0\s*)?\)|\bcollections\.deque\s*\(\s*\)"),
         "java": _r(r"new\s+(LinkedBlockingQueue|LinkedBlockingDeque|ConcurrentLinkedQueue|PriorityBlockingQueue)\s*(<[^>]*>)?\s*\(\s*\)"),
-        "kotlin": _r(r"Channel\s*(<[^>]*>)?\s*\(\s*(Channel\.)?UNLIMITED\s*\)|MutableSharedFlow\s*(<[^>]*>)?\s*\(\s*\)"),
-        "csharp": _r(r"Channel\.CreateUnbounded|new\s+(ConcurrentQueue|BlockingCollection)\s*(<[^>]*>)?\s*\(\s*\)"),
-        "scala": _r(r"new\s+(LinkedBlockingQueue|ConcurrentLinkedQueue)\s*(\[[^\]]*\])?\s*\(\s*\)|Queue\.unbounded"),
         "go": _r(r"\bmake\s*\(\s*chan\b[^)]*,\s*(1\d{4,}|[2-9]\d{4,})\s*\)"),
     }),
     "float-money": ("medium", "Floating point holds a money-like value. Binary floats cannot represent most decimal "
@@ -44,19 +41,12 @@ RULES: dict[str, tuple[str, str, dict[str, re.Pattern]]] = {
         "javascript": _r(r"\bDate\.now\s*\(\s*\)\s*-|-\s*\w*(start|began|begin|t0|started)\w*\b.*\bDate\.now\s*\("),
         "typescript": _r(r"\bDate\.now\s*\(\s*\)\s*-|-\s*\w*(start|began|begin|t0|started)\w*\b.*\bDate\.now\s*\("),
         "java": _r(r"System\.currentTimeMillis\s*\(\s*\)\s*-|-\s*\w*(start|began|begin|t0|started)\w*\b.*currentTimeMillis"),
-        "kotlin": _r(r"System\.currentTimeMillis\s*\(\s*\)\s*-|-\s*\w*(start|began|begin|t0|started)\w*\b.*currentTimeMillis"),
-        "scala": _r(r"System\.currentTimeMillis\s*\(\s*\)\s*-"),
-        "csharp": _r(r"DateTime\.(Utc)?Now\s*-|-\s*\w*(start|began|begin|t0|started)\w*\b.*DateTime\.(Utc)?Now"),
-        "php": _r(r"\btime\s*\(\s*\)\s*-|microtime\s*\(\s*true\s*\)\s*-"),
-        "ruby": _r(r"\bTime\.now\s*-"),
     }),
     "panic-on-external-data": ("medium", "Parsing or decoding outside data and unwrapping the result. Malformed input "
                                          "from a peer, file or API crashes the task (or the whole process). Handle the error.", {
         "rust": _r(r"\.parse\s*(::<[^>]*>)?\s*\(\s*\)\s*\.(unwrap|expect)\s*\(|serde_json::from_\w+\s*(::<[^>]*>)?\s*\([^;]*\)\s*\.(unwrap|expect)\s*\("
                    r"|\.(json|text|bytes)\s*(::<[^>]*>)?\s*\(\s*\)\s*\.await\s*\.(unwrap|expect)\s*\("),
         "go": _r(r"\b\w+,\s*_\s*:?=\s*(strconv\.\w+|json\.Unmarshal)\b|json\.Unmarshal\([^)]*\)\s*$"),
-        "swift": _r(r"try!\s+(JSONDecoder|JSONSerialization|Data\(|String\(contentsOf)"),
-        "kotlin": _r(r"!!\s*\.(toInt|toLong|toDouble)|\.(toInt|toLong|toDouble)\s*\(\s*\)(?!\s*OrNull)\s*!!"),
     }),
     "redos-regex": ("medium", "A regular expression with a repeated group that itself contains a repeat. On crafted "
                               "input a backtracking engine takes exponential time. Rewrite it or use a linear-time engine.", {
@@ -67,19 +57,13 @@ RULES: dict[str, tuple[str, str, dict[str, re.Pattern]]] = {
         "python": _r(r"\.fetchall\s*\(\s*\)|\.objects\.all\s*\(\s*\)\s*(?!\.)|SELECT\s+\*\s+FROM\s+\w+\s*['\"]"),
         "rust": _r(r"\.fetch_all\s*\(|\.find\s*\(\s*doc!\s*\{\s*\}"),
         "java": _r(r"\.findAll\s*\(\s*\)|\.getResultList\s*\(\s*\)"),
-        "kotlin": _r(r"\.findAll\s*\(\s*\)|\.getResultList\s*\(\s*\)"),
         "javascript": _r(r"\.find\s*\(\s*\{\s*\}\s*\)|\.findMany\s*\(\s*\)|\.findAll\s*\(\s*\)"),
         "typescript": _r(r"\.find\s*\(\s*\{\s*\}\s*\)|\.findMany\s*\(\s*\)|\.findAll\s*\(\s*\)"),
-        "ruby": _r(r"\b[A-Z]\w+\.all\b(?!\.(limit|find_each|in_batches))"),
-        "php": _r(r"::all\s*\(\s*\)"),
-        "csharp": _r(r"\.ToListAsync\s*\(\s*\)\s*;?\s*$"),
     }),
     "fire-and-forget-task": ("low", "A spawned task whose handle is dropped. Nothing waits for it, so its errors and "
                                     "panics vanish, shutdown does not wait for it, and (Python) it can be garbage collected mid-run.", {
         "rust": _r(r"^\s*(tokio::)?(task::)?spawn\s*\("),
         "python": _r(r"^\s*(asyncio\.)?(create_task|ensure_future)\s*\("),
-        "kotlin": _r(r"\bGlobalScope\.(launch|async)\b"),
-        "csharp": _r(r"^\s*_\s*=\s*Task\.Run\s*\(|^\s*Task\.Run\s*\("),
         "java": _r(r"new\s+Thread\s*\([^;]*\)\s*\.start\s*\(\s*\)"),
     }),
     "backoff-without-jitter": ("low", "Retries back off but with no random jitter. Clients that failed together retry "
@@ -91,8 +75,6 @@ _ASSIGN_AWAIT = {
     "python": re.compile(r"^\s*(\w+)\s*=\s*await\s+(.+)$"),
     "javascript": re.compile(r"^\s*(?:const|let|var)\s+(\w+)\s*=\s*await\s+(.+?);?\s*$"),
     "typescript": re.compile(r"^\s*(?:const|let|var)\s+(\w+)\s*=\s*await\s+(.+?);?\s*$"),
-    "csharp": re.compile(r"^\s*(?:var|\w+)\s+(\w+)\s*=\s*await\s+(.+?);\s*$"),
-    "kotlin": re.compile(r"^\s*val\s+(\w+)\s*=\s*(.+?)\.await\(\)\s*$"),
 }
 _SEQ_MSG = ("Consecutive awaits where the second does not use the first's result run one after the other. "
             "If the calls are independent, start them together (join/gather/Promise.all/WhenAll) to cut the wait to the slower one.")
