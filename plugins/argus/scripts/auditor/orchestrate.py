@@ -238,7 +238,7 @@ def record(out_dir: Path, verdicts: list[dict]) -> dict:
         entry = {**v, "round": round_of.get(fid), "recorded_at": now(), "repro_check": st.repro_status(fid)}
         if verdict == "confirmed" and entry["repro_check"] != "passed":
             entry["verdict"] = "inconclusive"
-            entry["note"] = (f"investigator said confirmed, but the aggregate repro run shows "
+            entry["note"] = (f"investigator said confirmed, but the latest `repro` run of this finding's own test shows "
                              f"{entry['repro_check']}; rerun `repro` and record again")
             out["downgraded"].append(fid)
         sev = next((f["severity"] for f in st.map["findings"] if finding_id(f) == fid),

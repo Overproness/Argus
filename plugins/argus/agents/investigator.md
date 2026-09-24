@@ -178,6 +178,27 @@ installed". Do not substitute a Python imitation of the code.
    the map claims (use qualnames as in the chain). The queue then suppresses
    every other finding that relies on that edge.
 
+## Before you start, and what makes a repro valid
+
+- **Confirm you are in the right tree.** Read `<repo>/<file>` around the
+  item's line first and check the function named in the item is really there.
+  If it is not (a path with a trailing space, a similarly named sibling
+  directory), stop and report `inconclusive` with "wrong tree: <what you
+  found>". Never judge a finding against a different project.
+- **Build paths from the repo root, not the current directory.** In a repro
+  file use `from auditor.repro.native import repo_root` (or `ARGUS_REPO`), never
+  a bare relative path like `app/main.py`. The runner starts pytest in the
+  repo root, but your test may be rerun from elsewhere.
+- **Make the test self-contained.** Start any fake peer inside the test with
+  `with fault_server(...) as srv:`; never rely on a server you started by hand
+  in another shell. `repro` reruns the file cold, and a test that only passes
+  beside a hand-started server will be downgraded to `inconclusive`.
+- **Do not stub the code under test.** If the repo's framework will not
+  import (mismatched versions, missing package), report `inconclusive` and
+  name the environment problem. A repro that replaces `fastapi` (or the
+  client library, or the function itself) with a stub proves nothing about
+  the repo.
+
 ## Limits
 
 - Do not modify files outside `.audit/repros/`. Probes depend on the repo by
