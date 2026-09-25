@@ -17,7 +17,7 @@ CASES = {
             ("io-in-loop", "medium", "app.service.tick", 25),
             ("io-in-loop", "medium", "app.service.stream", 36),
             ("io-without-timeout", "low", "app.service.stream", 36),  # aiohttp 300s default
-            ("lock-across-await", "medium", "app.service.tick", 30),
+            ("lock-across-await", "high", "app.service.tick", 30),
             ("nested-loops", "info", "app.service.matrix", 39),
         ],
         "absent": [("blocking-in-async", 28), ("io-without-timeout", 16)],

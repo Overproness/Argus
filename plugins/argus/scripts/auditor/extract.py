@@ -456,6 +456,7 @@ class FileExtractor:
             qualname=spec.sep.join([*mods, *([cont] if cont else []), name]),
             file=self.rel, line=line, end_line=node.end_point[0] + 1, module=mods,
             container=cont, is_async=is_async, is_entry=is_entry, private=private,
+            is_startup=bool(spec.startup and spec.startup.search(prefix + " " + header)),
         )
         if node.child_by_field_name("parameter") is not None:  # JS `x => ...`
             fn.arity = (0 if spec.arity_mode == "no_min" else 1, 1)

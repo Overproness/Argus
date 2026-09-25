@@ -28,8 +28,14 @@ def repro_json(out, *passing):
 def test_first_round_is_ranked_and_budgeted(audit):
     q = orchestrate.queue(audit, {"total": 4, "per_round": 2, "max_rounds": 3})
     assert q["round"] == 1 and len(q["items"]) == 2 and q["stop"] is None
-    assert [it["severity"] for it in q["items"]] == ["high", "high"]
+    assert q["items"][0]["severity"] == "high"
     assert q["items"][0]["score"] >= q["items"][1]["score"]
+    # One investigation per function: every queued finding of that function rides along in `findings`.
+    assert len({it["function"] for it in q["items"]}) == 2
+    for it in q["items"]:
+        assert it["findings"][0]["id"] == it["id"]
+        assert it["repo"] == str(audit.parent) and it["abs_file"].startswith(str(audit.parent))
+        assert f"{it['line']:>5}" in it["source"]  # the real code, so a wrong tree is obvious
     assert q["budget"] == {"total": 4, "per_round": 2, "max_rounds": 3, "issued": 0, "remaining": 4}
     assert all(s["reason"] for s in q["skipped"])
     ledger = json.loads((audit / "verdicts.json").read_text())
@@ -139,7 +145,9 @@ def test_final_report(audit):
     assert by_id[proven]["status"] == "proven" and by_id[rejected]["status"] == "rejected"
     assert data["findings"][0]["id"] == proven  # proven first
     assert data["summary"]["by_status"]["proven"] == 1
-    assert data["effects"]["deadlines"] and data["meta"]["investigated"] == 2
+    assert data["effects"]["deadlines"] and data["meta"]["investigated"] >= 2
+    via = [f for f in data["findings"] if (f.get("verdict") or {}).get("via")]
+    assert all(f["verdict"]["via"] in (proven, rejected) for f in via)  # same-effect findings share the verdict
     paths = report_html.write(data, audit)
     page = paths[2].read_text(encoding="utf8")
     assert page.startswith('<meta charset="utf-8">\n<title>repo audit</title>')
@@ -147,3 +155,37 @@ def test_final_report(audit):
     assert "</script>" not in page.split('id="argus-data">')[1].split("</script>")[0]  # data can't break out
     md = paths[1].read_text(encoding="utf8")
     assert "## Proven (1)" in md and "the loop freezes for 30 s" in md
+
+
+def test_function_grouping_and_same_effect_verdicts(audit):
+    q = orchestrate.queue(audit, {"total": 20, "per_round": 20})
+    fns = [it["function"] for it in q["items"]]
+    assert len(fns) == len(set(fns))
+    issued = {f["id"] for it in q["items"] for f in it["findings"]}
+    # Nothing issued comes back next round, whether it was the primary or rode along.
+    orchestrate.record(audit, [{"finding": i, "verdict": "rejected", "reason": "x"} for i in issued])
+    q2 = orchestrate.queue(audit, dry_run=True)
+    assert not issued & {it["id"] for it in q2["items"]}
+
+
+def test_tooling_inconclusive_is_retried_once(audit):
+    fid = orchestrate.queue(audit, {"total": 10, "per_round": 1})["items"][0]["id"]
+    orchestrate.record(audit, [{"finding": fid, "verdict": "inconclusive", "blocked_by": "wrong-tree",
+                                "reason": "read the sibling directory"}])
+    q = orchestrate.queue(audit, {"per_round": 10})
+    assert fid in {it["id"] for it in q["items"]}
+    orchestrate.record(audit, [{"finding": fid, "verdict": "inconclusive", "blocked_by": "wrong-tree"}])
+    led = json.loads((audit / "verdicts.json").read_text())
+    assert led["verdicts"][fid]["attempts"] == 2
+    assert fid not in {it["id"] for it in orchestrate.queue(audit, dry_run=True)["items"]}
+
+
+def test_confirmed_checks_its_own_repro_file(audit):
+    fid = orchestrate.queue(audit, {"total": 4, "per_round": 1})["items"][0]["id"]
+    # The test crashed before it could print its finding id: matched by file, and it failed.
+    (audit / "repro.json").write_text(json.dumps({"tests": [
+        {"file": "test_mine.py", "test": "test_a", "outcome": "failed", "time_s": 0, "message": "boom",
+         "evidence": [], "finding": None}], "exit_code": 1, "output_tail": ""}))
+    orchestrate.record(audit, [{"finding": fid, "verdict": "confirmed", "repro_file": ".audit/repros/test_mine.py"}])
+    v = json.loads((audit / "verdicts.json").read_text())["verdicts"][fid]
+    assert v["verdict"] == "inconclusive" and v["repro_check"] == "failed" and v["blocked_by"] == "repro-check"

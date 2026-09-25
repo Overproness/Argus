@@ -109,6 +109,7 @@ class LangSpec:
     timeout_text: re.Pattern | None = None
     client_timeout: re.Pattern | None = None
     entry: re.Pattern | None = None  # matched against attributes + header
+    startup: re.Pattern | None = None  # runs once before serving traffic (startup hooks): matched like `entry`
     rules: list[Rule] = field(default_factory=list)
     imports: Callable[[Node], dict[str, str]] = lambda root: {}
     hooks: list[Hook] = field(default_factory=list)

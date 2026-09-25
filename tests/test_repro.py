@@ -125,3 +125,81 @@ def test_runner_reports_failed_repro(tmp_path):
     assert res["tests"][0]["outcome"] == "failed"
     assert res["tests"][0]["evidence"] == [{"finding": "x@y:1", "seen": 0}]
     assert "not reproduced" in res["tests"][0]["message"]
+
+
+def _write(repo, name, body):
+    d = repo / ".audit" / "repros"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text(body)
+    return d / name
+
+
+def test_files_are_isolated_from_each_other(tmp_path):
+    """The failure from a real run: one repro chdir'd and monkeypatched a shared module without undoing it,
+    so the next file's relative path and its HTTP client pointed at a dead server."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("X = 1\n")
+    _write(tmp_path, "test_a_polluter.py",
+           "import os, tempfile, json\n"
+           "def test_pollute():\n"
+           "    os.chdir(tempfile.mkdtemp())\n"
+           "    json.dumps = lambda *a, **k: 'patched'\n")
+    _write(tmp_path, "test_b_victim.py",
+           "import json\n"
+           "from auditor.repro.harness import evidence, repo_path\n"
+           "def test_relative_and_module_state():\n"
+           "    assert open('app/main.py').read() == 'X = 1\\n'\n"
+           "    assert repo_path('app', 'main.py').exists()\n"
+           "    assert json.dumps(1) == '1'\n"
+           "    evidence(finding='x@victim:1')\n")
+    res = runner.run(tmp_path, tmp_path / ".audit")
+    by = {t["test"]: t for t in res["tests"]}
+    assert by["test_relative_and_module_state"]["outcome"] == "passed", by
+    assert res["meta"]["isolation"] == "one process per file"
+
+
+def test_cwd_restored_between_tests_in_one_file(tmp_path):
+    (tmp_path / "data.txt").write_text("ok")
+    _write(tmp_path, "test_two.py",
+           "import os, tempfile\n"
+           "def test_1_moves():\n    os.chdir(tempfile.mkdtemp())\n"
+           "def test_2_reads():\n    assert open('data.txt').read() == 'ok'\n")
+    res = runner.run(tmp_path, tmp_path / ".audit")
+    assert {t["test"]: t["outcome"] for t in res["tests"]} == {"test_1_moves": "passed", "test_2_reads": "passed"}
+
+
+def test_single_file_runs_merge_instead_of_overwriting(tmp_path):
+    """Investigators run `repro --file` in parallel: each run keeps everyone else's results."""
+    import concurrent.futures as cf
+    files = [_write(tmp_path, f"test_p{i}.py",
+                    f"from auditor.repro.harness import evidence\ndef test_p{i}():\n    evidence(finding='r@f{i}:1')\n")
+             for i in range(4)]
+    with cf.ThreadPoolExecutor(4) as ex:
+        list(ex.map(lambda f: runner.run(tmp_path, tmp_path / ".audit", f), files))
+    data = json.loads((tmp_path / ".audit" / "repro.json").read_text())
+    assert sorted(t["finding"] for t in data["tests"]) == [f"r@f{i}:1" for i in range(4)]
+    assert runner.status_of(data, "r@f2:1") == "passed"
+
+
+def test_collection_error_is_reported_per_file(tmp_path):
+    _write(tmp_path, "test_broken.py", "import definitely_not_installed_module\ndef test_x():\n    pass\n")
+    res = runner.run(tmp_path, tmp_path / ".audit")
+    [t] = res["tests"]
+    assert t["outcome"] == "error" and t["file"] == "test_broken.py"
+    assert runner.status_of(res, "any@x:1", ".audit/repros/test_broken.py") == "failed"
+
+
+def test_repro_file_outside_this_repo_is_refused(tmp_path):
+    """A repro written into a sibling tree must not be run (and recorded) against this repo."""
+    other = tmp_path / "other"
+    f = _write(other, "test_x.py", "def test_x():\n    pass\n")
+    (tmp_path / "repo").mkdir()
+    with pytest.raises(ValueError, match="not in"):
+        runner.run(tmp_path / "repo", tmp_path / "repo" / ".audit", f)
+
+
+def test_repo_venv_is_preferred(tmp_path, monkeypatch):
+    monkeypatch.delenv("ARGUS_REPRO_PYTHON", raising=False)
+    py, why = runner.pick_python(tmp_path, tmp_path / ".audit")
+    assert py == sys.executable and "no repo environment" in why
+    assert runner.pick_python(tmp_path, tmp_path / ".audit", "/x/python")[0] == "/x/python"

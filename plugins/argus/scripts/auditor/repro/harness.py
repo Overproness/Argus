@@ -12,16 +12,25 @@ making the predicted effect happen under controlled conditions:
   call_with_deadline()  runs a blocking call in a thread and gives up after N s
   scaling()             times a function at several input sizes and fits O(n^k)
   count_calls()         counts calls to a function (N+1 checks)
+  run_concurrently()    starts n calls of a coroutine function at once (races: lost updates, check-then-act)
+  threads_concurrently() runs n calls in n threads at once, with a deadline (deadlocks, thread races)
+  peak_concurrency()    counts how many calls of a function are in flight at once (unbounded fan-out)
+  thread_growth()       counts threads left running after a block (thread-per-request leaks)
+  repo_root(), repo_path()  absolute paths into the repo under audit (never use bare relative paths)
 """
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import json
+import os
 import socket
 import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from ..trace.fit import Fit, fit_power
 
@@ -32,6 +41,16 @@ LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost", "0.0.0.0")
 def evidence(**facts) -> None:
     """Record a measured fact. Collected by the runner; keep values JSON-serializable."""
     print(EVIDENCE_PREFIX + json.dumps(facts, default=str), flush=True)
+
+
+def repo_root() -> Path:
+    """The repo under audit. The runner sets ARGUS_REPO; never rely on the current directory."""
+    return Path(os.environ.get("ARGUS_REPO") or os.getcwd()).resolve()
+
+
+def repo_path(*parts: str) -> Path:
+    """An absolute path inside the repo under audit: `repo_path("app", "main.py")`."""
+    return repo_root().joinpath(*parts)
 
 
 # --- network conditions --------------------------------------------------------
@@ -226,3 +245,102 @@ def timed(fn, *args, **kwargs) -> tuple:
     t0 = time.perf_counter()
     result = fn(*args, **kwargs)
     return result, time.perf_counter() - t0
+
+
+# --- concurrency ------------------------------------------------------------------
+
+async def run_concurrently(fn, n: int, *args, **kwargs) -> list:
+    """Start n calls of coroutine function `fn` together (asyncio.gather) and return their results or
+    exceptions. Interleavings at every `await` are real, so read-modify-write and check-then-act races show."""
+    results = await asyncio.gather(*(fn(*args, **kwargs) for _ in range(n)), return_exceptions=True)
+    errors = [r for r in results if isinstance(r, BaseException)]
+    evidence(kind="concurrent", fn=getattr(fn, "__qualname__", str(fn)), calls=n, errors=len(errors),
+             error_types=sorted({type(e).__name__ for e in errors}))
+    return results
+
+
+def threads_concurrently(fns, deadline: float) -> dict:
+    """Run each callable in `fns` in its own thread, all released at once. Returns {finished, stuck,
+    elapsed_s, errors}. `stuck > 0` after `deadline` seconds means they deadlocked (or hang)."""
+    barrier = threading.Barrier(len(fns))
+    errors: list[str] = []
+
+    def wrap(f):
+        def target():
+            barrier.wait()
+            try:
+                f()
+            except BaseException as e:  # noqa: BLE001 - report whatever the call raised
+                errors.append(f"{type(e).__name__}: {e}")
+        return target
+
+    threads = [threading.Thread(target=wrap(f), daemon=True) for f in fns]
+    t0 = time.perf_counter()
+    for t in threads:
+        t.start()
+    end = t0 + deadline
+    for t in threads:
+        t.join(max(0.0, end - time.perf_counter()))
+    stuck = sum(t.is_alive() for t in threads)
+    out = {"finished": len(threads) - stuck, "stuck": stuck, "elapsed_s": round(time.perf_counter() - t0, 4),
+           "deadline_s": deadline, "errors": errors[:10]}
+    evidence(kind="threads", **out)
+    return out
+
+
+@contextmanager
+def peak_concurrency(module, name: str):
+    """Count how many calls of module.<name> (sync or async) are in flight at once inside the block.
+    Yields {'calls', 'peak'}; an unbounded fan-out shows peak == number of items."""
+    original = getattr(module, name)
+    box = {"calls": 0, "peak": 0, "_now": 0}
+    lock = threading.Lock()
+
+    def enter():
+        with lock:
+            box["calls"] += 1
+            box["_now"] += 1
+            box["peak"] = max(box["peak"], box["_now"])
+
+    def leave():
+        with lock:
+            box["_now"] -= 1
+
+    if inspect.iscoroutinefunction(original):
+        @functools.wraps(original)
+        async def counting(*a, **k):
+            enter()
+            try:
+                return await original(*a, **k)
+            finally:
+                leave()
+    else:
+        @functools.wraps(original)
+        def counting(*a, **k):
+            enter()
+            try:
+                return original(*a, **k)
+            finally:
+                leave()
+
+    setattr(module, name, counting)
+    try:
+        yield box
+    finally:
+        setattr(module, name, original)
+        box.pop("_now", None)
+        evidence(kind="peak_concurrency", fn=f"{getattr(module, '__name__', module)}.{name}", **box)
+
+
+@contextmanager
+def thread_growth(settle: float = 0.2):
+    """Threads alive after the block minus before it (after `settle` seconds). Yields {'before', 'after',
+    'growth'}, filled in on exit; growth == calls means one leaked thread per call."""
+    box = {"before": threading.active_count(), "after": None, "growth": None}
+    try:
+        yield box
+    finally:
+        time.sleep(settle)
+        box["after"] = threading.active_count()
+        box["growth"] = box["after"] - box["before"]
+        evidence(kind="thread_growth", **box)

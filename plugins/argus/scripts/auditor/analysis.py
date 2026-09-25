@@ -39,6 +39,8 @@ BLOCK_SEVERITY = {FS: "medium"}
 FAMILY = {"typescript": "javascript", "cpp": "c", "java": "jvm"}
 SPEC_BY_NAME = {s.name: s for s in SPECS}
 SCOPE_SELF = {"Self", "self", "static", "parent", "this"}
+STARTUP_NOTE = (" It runs in a startup hook, once, before the server takes traffic: it delays boot rather than "
+                "freezing requests.")
 
 
 def family(lang: str) -> str:
@@ -285,9 +287,11 @@ class RepoMap:
             fn, c, spec = fns[b.function], b.call, self.spec(fns[b.function])
             where = f"{'blocking ' if b.blocking else ''}{b.kind} `{c.snippet}`"
             if b.blocking and c.context == "async" and spec.has_async:
+                sev = BLOCK_SEVERITY.get(b.category, "high")
                 F.append(self._finding(
-                    "blocking-in-async", BLOCK_SEVERITY.get(b.category, "high"), b.confidence, fn, c.line,
-                    f"Blocking call on an async path ({where}). A slow response stalls {spec.stall_phrase}.",
+                    "blocking-in-async", "low" if fn.is_startup else sev, b.confidence, fn, c.line,
+                    f"Blocking call on an async path ({where}). A slow response stalls {spec.stall_phrase}."
+                    + (STARTUP_NOTE if fn.is_startup else ""),
                     reached_from=self._roots(fn.id),
                 ))
             if b.category == NET and not self.bounded(b):
@@ -318,11 +322,14 @@ class RepoMap:
                 sev = BLOCK_SEVERITY.get(terminal.category, "high")
                 if weakest == "name":
                     sev = DOWNGRADE[sev]
+                if caller.is_startup:
+                    sev = "low"
                 F.append(self._finding(
                     "blocking-in-async", sev, weakest, caller, e.line,
                     f"Async code calls sync `{callee.qualname}`, which blocks ({terminal.kind}). A slow "
                     f"response stalls {self.spec(caller).stall_phrase}."
-                    + (" Part of the chain is name-matched; confirm it." if weakest == "name" else ""),
+                    + (" Part of the chain is name-matched; confirm it." if weakest == "name" else "")
+                    + (STARTUP_NOTE if caller.is_startup else ""),
                     chain=[caller.qualname, *names],
                     reached_from=self._roots(caller.id),
                 ))
@@ -334,7 +341,9 @@ class RepoMap:
                 ))
 
         for fid, hit in self.hook_hits:
-            F.append(self._finding(hit.rule, hit.severity, hit.confidence, fns[fid], hit.line, hit.message))
+            if not hit.rule.startswith("_"):  # "_"-rules are facts for repo-wide passes, not findings
+                F.append(self._finding(hit.rule, hit.severity, hit.confidence, fns[fid], hit.line, hit.message))
+        F.extend(self._lock_order())
 
         for fn in fns.values():
             if fn.max_loop_depth >= 2:
@@ -353,7 +362,23 @@ class RepoMap:
                     "pool or thread, or yield periodically. Runtime tracing shows how long it really runs.",
                 ))
 
-        for scc in self._sccs():
+        sccs = self._sccs()
+        recursive = {fid for scc in sccs for fid in scc}
+        flagged = set()
+        for e in self.edges:
+            caller, callee = fns[e.caller], fns[e.callee]
+            if (e.context == "async" and caller.is_async and not callee.is_async and e.callee in recursive
+                    and e.caller not in recursive and self.spec(caller).has_async and e.caller not in flagged):
+                flagged.add(e.caller)
+                F.append(self._finding(
+                    "cpu-heavy-in-async", "medium", e.confidence, caller, e.line,
+                    f"Async code runs the recursive `{callee.qualname}` inline. Its cost grows with the input "
+                    f"(often exponentially), and the whole time it holds {self.spec(caller).stall_phrase}. Bound "
+                    "the input, memoize, or offload it (to_thread / a process pool).",
+                    chain=[caller.qualname, callee.qualname], reached_from=self._roots(caller.id),
+                ))
+
+        for scc in sccs:
             first = fns[scc[0]]
             F.append(self._finding(
                 "recursion", "info", "name", first, first.line,
@@ -366,6 +391,48 @@ class RepoMap:
         F.extend(fx_findings)
 
         F.sort(key=lambda f: (SEVERITY_ORDER[f.severity], f.file, f.line, f.rule))
+
+    def _lock_order(self) -> list[Finding]:
+        """Two code paths that take the same two locks in opposite orders can deadlock each other."""
+        regions: dict[str, list[tuple[str, int, int]]] = defaultdict(list)  # fid -> (lock key, first, last line)
+        for fid, hit in self.hook_hits:
+            if hit.rule != "_lock-region":
+                continue
+            owner, lock, lo, hi, _how = hit.message.split("|")
+            fn = self.functions[fid]
+            key = f"{owner}.{lock}" if owner else (lock if "." in lock else f"{'.'.join(fn.module)}:{lock}")
+            regions[fid].append((key, int(lo), int(hi)))
+        if not regions:
+            return []
+        order: dict[tuple[str, str], tuple[str, int, list[str]]] = {}  # (outer, inner) -> (fid, line, chain)
+        for fid, regs in regions.items():
+            fn = self.functions[fid]
+            for a, lo, hi in regs:
+                for b, lo2, _ in regs:
+                    if b != a and lo < lo2 <= hi:
+                        order.setdefault((a, b), (fid, lo2, [fn.qualname]))
+                for e in self.out_edges[fid]:
+                    if lo <= e.line <= hi and e.callee != fid:
+                        for b, _, _ in regions.get(e.callee, []):
+                            if b != a:
+                                order.setdefault((a, b), (fid, e.line, [fn.qualname, self.functions[e.callee].qualname]))
+        out, done = [], set()
+        for (a, b), (fid, line, chain) in sorted(order.items()):
+            if (b, a) not in order or frozenset((a, b)) in done:
+                continue
+            done.add(frozenset((a, b)))
+            fid2, line2, chain2 = order[(b, a)]
+            f1, f2 = self.functions[fid], self.functions[fid2]
+            short = lambda k: k.split(":")[-1]
+            out.append(self._finding(
+                "lock-order-inversion", "high", "heuristic", f1, line,
+                f"`{f1.qualname}` takes `{short(a)}` then `{short(b)}` (line {line}), while `{f2.qualname}` takes "
+                f"`{short(b)}` then `{short(a)}` ({f2.file}:{line2}). Two concurrent calls can each hold one lock and "
+                "wait forever for the other: a deadlock that freezes both and every later caller. Take locks in "
+                "one fixed order everywhere.",
+                chain=chain + chain2, reached_from=self._roots(f1.id),
+            ))
+        return out
 
     def bounded(self, b: Boundary) -> bool:
         if b.call.has_timeout:

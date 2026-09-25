@@ -9,7 +9,8 @@
                                      [--coverage v8-coverage-dir] [--stall-ms 100] [--assume ARG=N]
   auditor_cli.py lint-import <repo> [--sarif FILE ...] [--run [ruff,golangci-lint,semgrep]]
   auditor_cli.py trace-report <repo> [--out DIR] [--stall-ms 100] [--assume ARG=N]
-  auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600]
+  auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600] [--python PY]
+  auditor_cli.py repro-env <repo> [--out DIR] [--python BASE_PY] [--with PKG ...]
   auditor_cli.py queue <repo> [--budget 10] [--per-round 5] [--max-rounds 3] [--rule R] [--dry-run]
   auditor_cli.py record <repo> (--file verdicts.json | -)
   auditor_cli.py report <repo> [--out DIR]
@@ -92,6 +93,15 @@ def main() -> int:
     pp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
     pp.add_argument("--file", type=Path, help="run one reproduction file instead of all")
     pp.add_argument("--timeout", type=int, default=600, help="seconds before the whole run is killed")
+    pp.add_argument("--python", help="interpreter to run the tests with (default: the repo's environment, "
+                                     "<out>/venv, .venv or venv, else argus's own)")
+    ep = sub.add_parser("repro-env", help="create <out>/venv with the repo's dependencies and pytest, so "
+                                          "reproductions import the real code")
+    ep.add_argument("repo", type=Path)
+    ep.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
+    ep.add_argument("--python", help="base interpreter for the venv (default: python3 on PATH)")
+    ep.add_argument("--with", dest="extra", action="append", default=[], metavar="PKG",
+                    help="extra package to install (e.g. httpx for ASGI test clients)")
     qp = sub.add_parser("queue", help="next round of findings to investigate, ranked and within budget")
     qp.add_argument("repo", type=Path)
     qp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
@@ -152,6 +162,12 @@ def main() -> int:
 
     repo = args.repo.resolve()
     out_dir = (args.out or repo / ".audit").resolve()
+    if not repo.is_dir():
+        print(f"{args.cmd}: {str(repo)!r} is not a directory", file=sys.stderr)
+        return 2
+    from auditor import paths
+    for w in paths.warnings(repo):
+        print(f"warning: {w}", file=sys.stderr)
 
     if args.cmd in ("trace", "trace-report", "trace-import"):
         from auditor.trace import sources, spans
@@ -263,14 +279,16 @@ def main() -> int:
                 out_dir, {"total": args.budget, "per_round": args.per_round, "max_rounds": args.max_rounds},
                 set(args.rule) or None, args.include_low, args.include_info, args.retry_inconclusive, args.dry_run)
             b = res["budget"]
+            for w in res.get("path_warnings", []):
+                print(f"warning: {w}", file=sys.stderr)
             if res["stop"]:
                 print(f"stop: {res['stop']} (budget {b['issued']}/{b['total']} used)")
             else:
                 print(f"round {res['round']}: {len(res['items'])} item(s), {len(res['deferred'])} deferred, "
                       f"{len(res['skipped'])} skipped, budget {b['issued'] + len(res['items'])}/{b['total']}")
                 for it in res["items"]:
-                    extra = f" (+{len(it['covers'])} merged)" if it.get("covers") else ""
-                    print(f"  {it['score']:>5}  {it['id']}{extra}")
+                    more = [f["id"] for f in it["findings"][1:]]
+                    print(f"  {it['score']:>5}  {it['id']}" + (f"  + {', '.join(more)}" if more else ""))
             if res["pending"]:
                 print(f"warning: {len(res['pending'])} item(s) from earlier rounds have no verdict: "
                       + ", ".join(res["pending"][:5]), file=sys.stderr)
@@ -289,7 +307,9 @@ def main() -> int:
                 return 1
             res = orchestrate.record(out_dir, data if isinstance(data, list) else [data])
             print(f"recorded {len(res['recorded'])}, downgraded {len(res['downgraded'])}, "
-                  f"refused {len(res['rejected_input'])}")
+                  f"refused {len(res['rejected_input'])}"
+                  + (f", applied to {len(res['applied_to_same_effect'])} same-effect finding(s)"
+                     if res["applied_to_same_effect"] else ""))
             for fid in res["downgraded"]:
                 print(f"  downgraded to inconclusive (repro did not pass): {fid}")
             for r in res["rejected_input"]:
@@ -304,14 +324,29 @@ def main() -> int:
 
     if args.cmd == "repro":
         from auditor.repro import runner
-        res = runner.run(repo, out_dir, args.file.resolve() if args.file else None, args.timeout)
-        jp, mp_ = runner.write(res, out_dir)
+        try:
+            res = runner.run(repo, out_dir, args.file.resolve() if args.file else None, args.timeout, args.python)
+        except (ValueError, FileNotFoundError) as e:
+            print(f"repro: {e}", file=sys.stderr)
+            return 2
         counts = {}
         for t in res["tests"]:
             counts[t["outcome"]] = counts.get(t["outcome"], 0) + 1
         print(", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or res["output_tail"])
-        print(f"wrote {jp}\nwrote {mp_}")
+        print(f"python: {res['meta']['python']} ({res['meta']['python_why']})")
+        if args.file:
+            mine = [t for t in res["tests"] if t["file"] == args.file.name]
+            for t in mine:
+                print(f"  {t['file']}::{t['test']}: {t['outcome']}" + (f" - {t['message'][:300]}" if t["message"] else ""))
+        print(f"wrote {out_dir / 'repro.json'}\nwrote {out_dir / 'repro.md'}")
         return 0 if res["exit_code"] in (0, 1) else 1
+
+    if args.cmd == "repro-env":
+        from auditor.repro import runner
+        r = runner.setup_env(repo, out_dir, args.python, args.extra)
+        print("\n".join(r["log"]))
+        print(f"{'ready' if r['ok'] else 'incomplete'}: {r['python']}")
+        return 0 if r["ok"] else 1
 
     if args.cmd == "index":
         wanted = set(args.only.split(",")) if args.only else {

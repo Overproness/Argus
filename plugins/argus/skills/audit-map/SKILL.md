@@ -1,6 +1,6 @@
 ---
 name: audit-map
-description: Build a static audit map of a repository in Rust, Python, JS/TS, Go, Java or C/C++ and triage its findings. The map covers the call graph, a list of every I/O and external call, hotspots, and effects propagated across calls (worst-case waits, deadlines, retries). Findings include blocking calls on async paths (including through call chains), external calls without timeouts, I/O in loops (N+1), sync locks held across await, sync-over-async, deadlines that cannot fire, timeout budgets exceeded, entry points that can hang, retry storms, crash-on-network-error, unbounded goroutines and recursion. Use when the user wants to audit a repo for performance or reliability risks, find extreme cases, or asks "what could blow up in this codebase".
+description: Build a static audit map of a repository in Rust, Python, JS/TS, Go, Java or C/C++ and triage its findings. The map covers the call graph, a list of every I/O and external call, hotspots, and effects propagated across calls (worst-case waits, deadlines, retries). Findings include blocking calls on async paths (including through call chains), external calls without timeouts, I/O in loops (N+1), sync locks held across await, sync-over-async, deadlines that cannot fire, timeout budgets exceeded, entry points that can hang, retry storms, crash-on-network-error, unbounded goroutines and recursion, and (Python) races on shared state across await, lock-order inversions, leaked locks, mutation while iterating, a thread per request, unbounded gather fan-out, uncommitted writes and SQL built by string formatting. Use when the user wants to audit a repo for performance or reliability risks, find extreme cases, or asks "what could blow up in this codebase".
 argument-hint: "[repo path, default: current directory]"
 ---
 
@@ -75,17 +75,22 @@ Low and info findings: summarize them in one line each unless the user asks for 
 
 ## 3. Report
 
-Reply with:
+`map.json`/`map.md` already hold every finding with its message, chain and
+severity. Minimize output tokens: don't restate them all in prose. Reply with:
 
-- A short table of confirmed findings: severity, location, the chain in one
-  line, why it matters under an extreme case (for example, "exchange takes 30s
-  → runtime worker stalls → other tasks miss their ticks"), and the smallest fix.
-  Typical fixes: offload to a blocking pool, use the async client, add a timeout
-  or deadline, drop the guard before `await`, batch or bound concurrency.
-- Rejected findings, one line each with the reason. This is how the rules get
-  improved.
-- Findings that need evidence, and the experiment that would settle each one.
-- The top 5 hotspots from the map, as candidates for deeper investigation.
+- Counts by severity (high/medium/low/info) and by triage label (confirmed /
+  rejected / needs-evidence), in one or two lines.
+- **Confirmed, high-severity** findings only, as a compact table: location,
+  one-line why it matters (e.g. "exchange takes 30s → runtime worker stalls →
+  other tasks miss their ticks"), smallest fix. Cap at 10 rows; typical fixes:
+  offload to a blocking pool, use the async client, add a timeout or deadline,
+  drop the guard before `await`, batch or bound concurrency.
+- **Rejected** findings, one line each with the reason, only if there are
+  5 or fewer; otherwise just the count (this is how the rules get improved,
+  but a long list here costs more than it's worth reading).
+- Top 3 hotspots, one line each, not 5 with full detail.
+- Everything else (medium/low/info detail, needs-evidence items) stays in
+  `map.md` — point at it instead of listing them.
 
 Do not add problems that are not in the map. If you notice something outside it
 while reading code, list it separately under "Unmapped observations

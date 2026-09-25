@@ -66,9 +66,23 @@ RULES: dict[str, tuple[str, str, dict[str, re.Pattern]]] = {
         "python": _r(r"^\s*(asyncio\.)?(create_task|ensure_future)\s*\("),
         "java": _r(r"new\s+Thread\s*\([^;]*\)\s*\.start\s*\(\s*\)"),
     }),
+    "sql-injection": ("high", "SQL text built by formatting values into it (f-string, %, +, format, template "
+                              "literal). A caller-controlled value changes the query itself: rows leak, filters are "
+                              "bypassed, tables are altered. Pass values as bind parameters.", {
+        "python": _r(r"""\.(execute|executemany|executescript|raw|exec_driver_sql)\s*\(\s*(f(["'])(?:(?!\3).)*\{|"""
+                     r"""(["'])(?:(?!\4).)*\4\s*(%\s*[\w(]|\+\s*\w|\.format\())|\btext\s*\(\s*f(["'])(?:(?!\6).)*\{"""),
+        "javascript": _r(r"\.(query|execute|raw|\$queryRawUnsafe|\$executeRawUnsafe)\s*\(\s*(`[^`]*\$\{|['\"][^'\"]*['\"]\s*\+\s*\w)"),
+        "typescript": _r(r"\.(query|execute|raw|\$queryRawUnsafe|\$executeRawUnsafe)\s*\(\s*(`[^`]*\$\{|['\"][^'\"]*['\"]\s*\+\s*\w)"),
+        "java": _r(r"\.(executeQuery|executeUpdate|execute|createQuery|createNativeQuery|prepareStatement)\s*\(\s*\"[^\"]*\"\s*\+\s*\w"),
+        "go": _r(r"\.(Query|QueryRow|Exec)(Context)?\s*\([^)]*(fmt\.Sprintf\(|\"[^\"]*\"\s*\+\s*\w)"),
+    }),
     "backoff-without-jitter": ("low", "Retries back off but with no random jitter. Clients that failed together retry "
                                     "together, which turns a short outage into repeated load spikes. Add jitter.", {}),
 }
+
+# Same rule, different stakes: a dropped Python task can be garbage collected mid-run and its exception is
+# only logged at exit, so it is worth an investigation, not just a note.
+SEVERITY_BY_LANG = {("fire-and-forget-task", "python"): "medium"}
 
 _ASSIGN_AWAIT = {
     "rust": re.compile(r"^\s*let\s+(?:mut\s+)?(\w+)\s*(?::[^=]+)?=\s*(.+?)\.await\s*\??\s*;\s*$"),
@@ -97,7 +111,7 @@ def pattern_rules(spec, fn_node, body, is_async) -> list[HookHit]:
             continue
         for ln, s in lines:
             if len(s) < 400 and rx.search(s):
-                hits.append(HookHit(rule, sev, ln, msg))
+                hits.append(HookHit(rule, SEVERITY_BY_LANG.get((rule, spec.name), sev), ln, msg))
                 break  # one lead per function and rule: enough to send the investigator there
     rx = _ASSIGN_AWAIT.get(spec.name)
     if rx is not None and is_async:

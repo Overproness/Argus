@@ -83,7 +83,8 @@ def audit_map(repo: str, include_tests: bool = False, out: str | None = None, fu
         return {"error": f"no supported source files under {root}"}
     jp, mp = report.write(m, out_dir)
     data = json.loads(jp.read_text(encoding="utf8"))
-    return {"map_json": str(jp), "map_md": str(mp), "stats": data["stats"],
+    return {"map_json": str(jp), "map_md": str(mp), "root": str(root),
+            "path_warnings": data["meta"].get("path_warnings", []), "stats": data["stats"],
             "hotspots": data["hotspots"][:PREVIEW], **_summarize(data["findings"], full)}
 
 
@@ -189,24 +190,44 @@ def audit_lint_import(repo: str, sarif_files: list[str] | None = None, run: bool
 
 
 @server.tool()
-def run_repro(repo: str, file: str | None = None, timeout: int = 600, out: str | None = None) -> dict:
+def run_repro(repo: str, file: str | None = None, timeout: int = 600, out: str | None = None,
+              python: str | None = None) -> dict:
     """Run reproduction tests under .audit/repros (or one file) and collect outcomes and evidence. Writes .audit/repro.{json,md}.
 
-    Returns counts by outcome, plus every test that did not pass (passing tests are in repro_json if you need
-    them, but "it passed" rarely needs a second look).
+    Every file runs in its own pytest process from the repo root, under the repo's environment when there is
+    one (see audit_repro_env). Returns counts by outcome, plus every test that did not pass (passing tests are
+    in repro_json if you need them, but "it passed" rarely needs a second look).
     """
     from auditor.repro import runner
 
     root = Path(repo).resolve()
     out_dir = _out(root, out)
-    res = runner.run(root, out_dir, Path(file).resolve() if file else None, timeout)
-    jp, mp = runner.write(res, out_dir)
+    try:
+        res = runner.run(root, out_dir, Path(file).resolve() if file else None, timeout, python)
+    except (ValueError, FileNotFoundError) as e:
+        return {"error": str(e)}
+    jp, mp = out_dir / "repro.json", out_dir / "repro.md"
     by_outcome = _counts(res["tests"], "outcome")
     not_passed = [t for t in res["tests"] if t["outcome"] != "passed"]
     return {"repro_json": str(jp), "repro_md": str(mp), "exit_code": res["exit_code"], "by_outcome": by_outcome,
             "tests": not_passed[:PREVIEW],
             "note": None if len(not_passed) <= PREVIEW else f"{len(not_passed) - PREVIEW} more not shown; read {jp}",
+            "python": res["meta"]["python"], "python_why": res["meta"]["python_why"],
             "output_tail": res["output_tail"] if res["exit_code"] not in (0, 1) else ""}
+
+
+@server.tool()
+def audit_repro_env(repo: str, python: str | None = None, extra: list[str] | None = None,
+                    out: str | None = None) -> dict:
+    """Create .audit/venv with the repo's dependencies (requirements*.txt or the project itself) and pytest.
+
+    run_repro uses it automatically afterwards, so reproductions import the repo's real code and framework
+    instead of stubbing them. Use it when a reproduction fails on an import or a version mismatch.
+    """
+    from auditor.repro import runner
+
+    root = Path(repo).resolve()
+    return runner.setup_env(root, _out(root, out), python, extra)
 
 
 @server.tool()

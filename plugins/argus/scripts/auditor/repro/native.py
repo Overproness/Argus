@@ -30,14 +30,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..procs import resolve
-from .harness import EVIDENCE_PREFIX, evidence
+from .harness import EVIDENCE_PREFIX, evidence, repo_root  # noqa: F401 - repo_root is re-exported
 
 WIN = sys.platform == "win32"
-
-
-def repo_root() -> Path:
-    """The repo under audit (the repro runner sets ARGUS_REPO and runs from the repo root)."""
-    return Path(os.environ.get("ARGUS_REPO") or os.getcwd()).resolve()
 
 
 # --- running and observing any program ----------------------------------------------------------

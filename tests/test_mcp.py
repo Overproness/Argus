@@ -22,7 +22,7 @@ def srv():
 def test_tools_registered(srv):
     import asyncio
     names = {t.name for t in asyncio.run(srv.server.list_tools())}
-    assert names == {"audit_map", "audit_trace", "audit_trace_import", "audit_lint_import", "run_repro", "audit_queue", "audit_record",
+    assert names == {"audit_map", "audit_trace", "audit_trace_import", "audit_lint_import", "run_repro", "audit_repro_env", "audit_queue", "audit_record",
                      "audit_report"}
 
 

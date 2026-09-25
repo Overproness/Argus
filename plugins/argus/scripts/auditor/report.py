@@ -7,6 +7,7 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import paths
 from .analysis import RepoMap
 
 
@@ -19,6 +20,7 @@ def to_json(m: RepoMap) -> dict:
             "tool": "argus/map",
             "version": 2,
             "root": str(m.root),
+            "path_warnings": paths.warnings(m.root),
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "languages": dict(langs.most_common()),
             "resolution": {
@@ -76,6 +78,9 @@ def _cell(s) -> str:
 def to_markdown(data: dict, max_findings: int = 200, max_rows: int = 150) -> str:
     s, meta, out = data["stats"], data["meta"], []
     out.append("# Repo audit map\n")
+    out.append(f"Root: `{meta['root']!r}`\n")
+    for w in meta.get("path_warnings", []):
+        out.append(f"> **Path warning:** {w}\n")
     langs = ", ".join(f"{k} ({v})" for k, v in meta["languages"].items())
     out.append(
         f"{s['files']} files [{langs}] · {s['functions']} functions ({s['async_functions']} async) · "

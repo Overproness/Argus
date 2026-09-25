@@ -53,6 +53,7 @@ class Function:
     container: str | None
     is_async: bool
     is_entry: bool
+    is_startup: bool = False  # a startup hook: runs once before the service takes traffic
     arity: tuple[int, float] | None = None  # (min, max) explicit args; None: unknown
     takes_self: bool = False  # has an explicit self parameter (Rust, Python)
     private: bool = False  # not callable from other modules (Rust non-pub, Go lowercase, `private`)

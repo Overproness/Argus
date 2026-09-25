@@ -145,9 +145,17 @@ Then read:
 
 ## 5. Report
 
-Update the audit-map triage:
-- move confirmed findings to **confirmed**, with the observed magnitude;
-- downgrade not-observed ones, with the workload caveat.
+`trace.md` already has every finding's status, stack and numbers. Minimize
+output tokens: update the audit-map triage, but reply with a summary, not a
+restatement of trace.md.
+
+- One line: counts by status (confirmed / not-observed / not-exercised /
+  not-traced / measured / not-verifiable).
+- Confirmed findings and unpredicted stalls, as a compact table (finding or
+  location · the number). Cap at 10 rows combined; point at `trace.md` for
+  the rest.
+- Downgrade not-observed findings in one line each, with the workload caveat,
+  only if there are 5 or fewer; otherwise just the count.
 
 Do not change the severity of a not-verifiable finding based on speed alone: a
 5 ms call without a timeout still hangs forever when the peer does.

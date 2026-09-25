@@ -2,8 +2,10 @@
 
 The `audit` skill drives rounds:
 
-  queue   ranked, budgeted work items for the next round (.audit/queue.json); opens the round in the ledger
-  ...     one investigator per item returns a verdict JSON
+  queue   ranked, budgeted work items for the next round (.audit/queue.json); opens the round in the ledger.
+          One item is one investigation of one function: every queued finding in that function (up to
+          MAX_PER_ITEM) rides along, low-severity ones included, so a site costs one investigator, not four.
+  ...     one investigator per item returns a verdict JSON list, one entry per finding in `findings`
   record  verdicts into .audit/verdicts.json, cross-checked against .audit/repro.json
   queue   next round: confirmed verdicts spawn caller-level items (effects travel up the call graph);
           rejected verdicts naming a wrong call edge suppress every finding whose chain uses that edge
@@ -18,12 +20,19 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import paths
+from .repro.runner import status_of
+
 SEV_W = {"high": 5.0, "medium": 3.0, "low": 1.0, "info": 0.5}
 CONF_W = {"exact": 1.0, "scip": 1.0, "unique": 0.9, "heuristic": 0.8, "name": 0.5}
 EVID_W = {"confirmed": 1.5, "measured": 1.2, "not-verifiable": 1.0, "not-exercised": 1.0, "not-observed": 0.3}
 VERDICTS = {"confirmed", "rejected", "inconclusive"}
 MAX_DERIVED_PER_VERDICT = 3
-DEFAULT_BUDGET = {"total": 10, "per_round": 5, "max_rounds": 3}
+MAX_PER_ITEM = 5  # findings one investigator handles in one function
+DEFAULT_BUDGET = {"total": 15, "per_round": 6, "max_rounds": 3}
+# Inconclusive for reasons outside the code (wrong tree, a broken reproduction run) is worth one more try.
+RETRYABLE = {"wrong-tree", "repro-error", "repro-check", "environment"}
+MAX_ATTEMPTS = 2
 
 
 def now() -> str:
@@ -73,11 +82,19 @@ class State:
     def save_ledger(self):
         (self.out / "verdicts.json").write_text(json.dumps(self.ledger, indent=2), encoding="utf8")
 
-    def repro_status(self, fid: str) -> str:
-        tests = [t for t in (self.repro or {}).get("tests", []) if t.get("finding") == fid]
-        if not tests:
-            return "missing"
-        return "passed" if any(t["outcome"] == "passed" for t in tests) else "failed"
+    def repro_status(self, fid: str, repro_file: str | None = None) -> str:
+        return status_of(self.repro, fid, repro_file)
+
+    def issued(self) -> set[str]:
+        """Every finding id handed to an investigator so far (primaries and the findings riding along)."""
+        out = set()
+        for r in self.ledger["rounds"]:
+            out.update(r["items"])
+            for ids in (r.get("findings") or {}).values():
+                out.update(ids)
+            for ids in (r.get("same_effect") or {}).values():
+                out.update(ids)
+        return out
 
 
 # --- queue ---------------------------------------------------------------------------
@@ -128,6 +145,27 @@ def _derive(st: State, fid: str, v: dict) -> list[dict]:
     return out
 
 
+def _brief(it: dict) -> dict:
+    d = {k: it.get(k) for k in ("id", "rule", "severity", "line", "message", "chain", "trace_evidence", "given")
+         if it.get(k) not in (None, [], {})}
+    if it.get("covers"):
+        d["same_effect"] = it["covers"]  # other findings with this rule and leaf: they take this verdict
+    return d
+
+
+def _locate(st: State, it: dict, root: Path) -> dict:
+    """Where the investigator must look, absolutely: the path is carried as data, never retyped."""
+    fn = next((f for f in st.map["functions"] if f["qualname"] == it["function"]
+               and (not it.get("file") or f["id"].startswith(it["file"] + ":"))), None)
+    rel = it.get("file") or (fn["id"].rsplit(":", 2)[0] if fn else "")
+    if not rel:
+        return {}
+    path = root / rel
+    lo, hi = (fn["lines"] if fn else (None, None))
+    return {"abs_file": str(path), "file_sha1": paths.file_digest(path),
+            "source": paths.excerpt(path, int(it["line"] or lo or 1), lo, hi)}
+
+
 def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = None,
           include_low: bool = False, include_info: bool = False, retry_inconclusive: bool = False,
           dry_run: bool = False) -> dict:
@@ -136,11 +174,12 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
     if budget:
         led["budget"].update({k: v for k, v in budget.items() if v is not None})
     b = led["budget"]
-    issued = [i for r in led["rounds"] for i in r["items"]]
-    pending = [i for i in issued if i not in led["verdicts"]]
-    round_no = len(led["rounds"]) + 1
-    remaining = b["total"] - len(issued)
+    primaries = [i for r in led["rounds"] for i in r["items"]]
+    issued = st.issued()
     verdicts = led["verdicts"]
+    pending = sorted(i for i in issued if i not in verdicts)
+    round_no = len(led["rounds"]) + 1
+    remaining = b["total"] - len(primaries)
     wrong_edges = [(v["wrong_edge"][0], v["wrong_edge"][1], fid) for fid, v in verdicts.items()
                    if v.get("verdict") == "rejected" and isinstance(v.get("wrong_edge"), list)
                    and len(v["wrong_edge"]) == 2]
@@ -155,12 +194,17 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
                 led["derived"].setdefault(d["id"], d)
     candidates += list(led["derived"].values())
 
-    items, skipped = [], []
+    def retryable(v: dict) -> bool:
+        return (v.get("verdict") == "inconclusive"
+                and (retry_inconclusive or v.get("blocked_by") in RETRYABLE)
+                and v.get("attempts", 1) < MAX_ATTEMPTS)
+
+    items, skipped, riders = [], [], []
     for c in candidates:
         fid = c["id"]
         v = verdicts.get(fid)
         reason = None
-        if v and not (retry_inconclusive and v.get("verdict") == "inconclusive"):
+        if v and not retryable(v):
             reason = f"verdict: {v.get('verdict')}"
         elif fid in issued and fid not in verdicts:
             reason = "pending: issued in an earlier round, no verdict recorded yet"
@@ -174,14 +218,16 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
             reason = f"suppressed: its chain uses the call edge rejected in {sup}"
         elif (c.get("trace_evidence") or {}).get("status") == "not-observed" and not rules:
             reason = "trace: not-observed under the recorded workload"
+        c["score"] = _score(c, st)
         if reason:
+            if reason == "low severity":
+                riders.append(c)  # investigated for free when its function is queued anyway
             skipped.append({"id": fid, "reason": reason, "severity": c["severity"], "lang": c["lang"]})
             continue
-        c["score"] = _score(c, st)
         c["harness"] = harness_for(c["lang"])
         items.append(c)
 
-    # One investigation per underlying effect: same rule and same leaf function.
+    # One verdict per underlying effect: same rule and same leaf function ("same_effect" copies it).
     merged: dict[tuple[str, str], dict] = {}
     for it in sorted(items, key=lambda x: -x["score"]):
         key = (it["rule"], _leaf(it))
@@ -189,7 +235,20 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
             merged[key].setdefault("covers", []).append(it["id"])
         else:
             merged[key] = it
-    ranked = sorted(merged.values(), key=lambda x: -x["score"])
+    # One investigation per function: its findings share the code, the setup and usually the test file.
+    by_fn: dict[str, dict] = {}
+    for it in sorted(merged.values(), key=lambda x: -x["score"]):
+        head = by_fn.get(it["function"])
+        if head is None:
+            it["findings"] = [_brief(it)]
+            by_fn[it["function"]] = it
+        elif len(head["findings"]) < MAX_PER_ITEM:
+            head["findings"].append(_brief(it))
+            head["score"] = round(head["score"] + 0.25 * it["score"], 3)
+        else:
+            it["findings"] = [_brief(it)]
+            by_fn[f"{it['function']}#{it['id']}"] = it
+    ranked = sorted(by_fn.values(), key=lambda x: -x["score"])
 
     stop = None
     take = max(0, min(b["per_round"], remaining))
@@ -200,19 +259,34 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
     elif not ranked:
         stop = "nothing left to investigate"
     selected = [] if stop else ranked[:take]
+    root = Path(st.map["meta"].get("root") or out_dir.parent)
+    riding: set[str] = set()
     for it in selected:
+        for r in sorted(riders, key=lambda x: -x["score"]):
+            if r["function"] == it["function"] and len(it["findings"]) < MAX_PER_ITEM:
+                it["findings"].append(_brief(r))
+                riding.add(r["id"])
         it["round"] = round_no
+        it["repo"] = str(root)
+        it.update(_locate(st, it, root))
+    skipped = [s for s in skipped if s["id"] not in riding]
 
     result = {
         "round": None if stop else round_no, "stop": stop,
-        "budget": {**b, "issued": len(issued), "remaining": max(remaining, 0)},
+        "budget": {**b, "issued": len(primaries), "remaining": max(remaining, 0)},
+        "repo": str(root), "path_warnings": paths.warnings(root),
         "pending": pending, "items": selected,
         "deferred": [it["id"] for it in ranked[take:]] if not stop else [it["id"] for it in ranked],
         "skipped": skipped,
     }
     if not dry_run:
         if selected:
-            led["rounds"].append({"round": round_no, "opened_at": now(), "items": [it["id"] for it in selected]})
+            led["rounds"].append({
+                "round": round_no, "opened_at": now(), "items": [it["id"] for it in selected],
+                "findings": {it["id"]: [f["id"] for f in it["findings"]] for it in selected},
+                "same_effect": {f["id"]: f["same_effect"] for it in selected for f in it["findings"]
+                                if f.get("same_effect")},
+            })
         st.save_ledger()
         (out_dir / "queue.json").write_text(json.dumps(result, indent=2), encoding="utf8")
     return result
@@ -223,9 +297,31 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
 def record(out_dir: Path, verdicts: list[dict]) -> dict:
     st = State(out_dir)
     led = st.ledger
-    round_of = {i: r["round"] for r in led["rounds"] for i in r["items"]}
+    round_of: dict[str, int] = {}
+    same_effect: dict[str, list[str]] = {}  # finding -> findings with the same rule and leaf: they take its verdict
+    for r in led["rounds"]:
+        for i in r["items"]:
+            round_of[i] = r["round"]
+        for ids in (r.get("findings") or {}).values():
+            for i in ids:
+                round_of[i] = r["round"]
+        for fid, ids in (r.get("same_effect") or {}).items():
+            same_effect[fid] = ids
+            for i in ids:
+                round_of[i] = r["round"]
     known = {finding_id(f) for f in st.map["findings"]} | set(led.get("derived", {}))
-    out = {"recorded": [], "downgraded": [], "rejected_input": []}
+    sev_of = {finding_id(f): f["severity"] for f in st.map["findings"]}
+    out = {"recorded": [], "downgraded": [], "rejected_input": [], "applied_to_same_effect": []}
+
+    def put(fid: str, entry: dict):
+        old = led["verdicts"].get(fid)
+        if old is not None:
+            entry["attempts"] = old.get("attempts", 1) + 1
+        sev = sev_of.get(fid, led.get("derived", {}).get(fid, {}).get("severity"))
+        if sev:
+            entry["severity"] = sev
+        led["verdicts"][fid] = entry
+
     for v in verdicts:
         fid, verdict = v.get("finding"), v.get("verdict")
         if not fid or verdict not in VERDICTS:
@@ -235,18 +331,22 @@ def record(out_dir: Path, verdicts: list[dict]) -> dict:
         if fid not in known:
             out["rejected_input"].append({"input": v, "reason": f"unknown finding id {fid}"})
             continue
-        entry = {**v, "round": round_of.get(fid), "recorded_at": now(), "repro_check": st.repro_status(fid)}
+        entry = {**v, "round": round_of.get(fid), "recorded_at": now(),
+                 "repro_check": st.repro_status(fid, v.get("repro_file"))}
         if verdict == "confirmed" and entry["repro_check"] != "passed":
             entry["verdict"] = "inconclusive"
+            entry["blocked_by"] = "repro-check"
             entry["note"] = (f"investigator said confirmed, but the latest `repro` run of this finding's own test shows "
-                             f"{entry['repro_check']}; rerun `repro` and record again")
+                             f"{entry['repro_check']}; it is queued once more automatically")
             out["downgraded"].append(fid)
-        sev = next((f["severity"] for f in st.map["findings"] if finding_id(f) == fid),
-                   led.get("derived", {}).get(fid, {}).get("severity"))
-        if sev:
-            entry["severity"] = sev
-        led["verdicts"][fid] = entry
+        put(fid, entry)
         out["recorded"].append(fid)
+        for other in same_effect.get(fid, []):
+            if other in known and other not in {x.get("finding") for x in verdicts}:
+                put(other, {**{k: entry[k] for k in ("verdict", "reason", "extreme_case", "smallest_fix",
+                                                     "repro_file", "repro_check", "blocked_by") if k in entry},
+                            "via": fid, "round": round_of.get(other), "recorded_at": now()})
+                out["applied_to_same_effect"].append(other)
     st.save_ledger()
     return out
 

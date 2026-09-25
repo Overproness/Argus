@@ -23,24 +23,33 @@ python "<plugin-root>/scripts/auditor_cli.py" queue "<repo>" --per-round N [--ru
 `N` is `--max` (default 5). Pass `--rule` for each rule the user named. The
 queue:
 - ranks findings by severity, confidence, trace evidence and hotspot score;
-- merges findings that share a leaf;
+- merges findings that share a rule and leaf (one verdict covers them), then
+  groups what is left by function: one item is one function and all of its
+  findings, with low-severity ones in that function riding along;
 - skips findings with verdicts, `info`/`low` severity, and `not-observed`
   evidence;
 - queues every language, with a `harness` field per item: Python in-process;
   other languages through the fault server, with a black-box run of the real
   program or a native probe.
 
-Read `.audit/queue.json` and tell the user what was skipped and why.
+Read `.audit/queue.json` and tell the user what was skipped and why. If it has
+`path_warnings`, tell the user in one line, and take the repo path only from
+its `repo` field from then on. For a Python repo whose code does not import
+under the default interpreter, run `repro-env "<repo>"` once before
+launching investigators.
 
 ## 2. Run investigators
 
 For each item, launch the `argus:investigator` agent with a self-contained
 prompt containing:
-- the repo path;
 - the plugin root;
-- the item JSON, verbatim.
+- the item JSON, verbatim (it carries `repo`, `abs_file` and the function's
+  `source`);
+- one line: "The repo root is the `repo` field; copy it exactly, including any
+  spaces."
 
-Run at most 3 at a time. Each returns one JSON verdict.
+Run at most 4 at a time. Each returns a JSON list, one verdict per finding in
+the item's `findings`.
 
 ## 3. Aggregate and record
 
@@ -49,20 +58,25 @@ python "<plugin-root>/scripts/auditor_cli.py" repro "<repo>"
 python "<plugin-root>/scripts/auditor_cli.py" record "<repo>" --file .audit/round-verdicts.json
 ```
 
-`repro` reruns every reproduction under `.audit/repros/`. Write the collected
-verdicts as a JSON list to `.audit/round-verdicts.json` before running
-`record`. A verdict only stands if its test passes in the aggregate run; the
+`repro` reruns every reproduction under `.audit/repros/`, each file in its own
+process. Concatenate the collected verdict lists into one JSON list in
+`.audit/round-verdicts.json` before running `record`. A verdict only stands if its test passes in the aggregate run; the
 ledger downgrades any that do not.
 
 ## 4. Report
 
-A table: finding · verdict · trigger · measured effect · extreme case ·
-smallest fix · repro file. Then:
+The full record (trigger, measured effect, extreme case, repro file per
+finding) is already in `.audit/verdicts.json` and, once `report` runs, in
+`report.md`. Minimize output tokens: don't restate all of that in chat.
 
-- **Rejected** findings with the investigator's reason. These improve the rules.
-- **Inconclusive** findings with what blocked them: a missing toolchain, a
-  dependency URL that cannot be pointed at the fault server, or real
-  infrastructure the code needs.
+Reply with:
+- One line: counts by verdict (confirmed / rejected / inconclusive).
+- **Confirmed** findings, as a compact table: finding · measured effect ·
+  smallest fix. Cap at 10 rows.
+- **Rejected** and **inconclusive**, one line each with the reason, only if
+  5 or fewer combined; otherwise just the counts (rejected reasons are how
+  the rules get improved — worth a look when the list is short, not worth a
+  wall of text when it isn't).
 - The reproduction files stay under `.audit/repros/`, so the user can move the
   useful ones into the test suite.
 - `report "<repo>"` writes the combined report (`.audit/report.html`) whenever
