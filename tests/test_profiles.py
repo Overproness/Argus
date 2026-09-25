@@ -209,7 +209,9 @@ def test_node_profile_end_to_end(tmp_path):
     loop = ev[("io-in-loop", "app.main")]
     assert loop["status"] == "confirmed" and "`app.get` ran 3× while `app.main` ran 1×" in loop["detail"]
     [u] = data["unpredicted_stalls"]
-    assert u["function"] == "app.crunch" and u["worst_s"] >= 0.2
+    # crunch() spins 300 ms; a loaded CI runner's sampler attributed as little as 0.166 s of it, so only
+    # require that a third of the spin was seen: still fails if the stall goes undetected.
+    assert u["function"] == "app.crunch" and u["worst_s"] >= 0.1
     assert all(run["source"] == "v8-cpuprofile" for run in data["meta"]["runs"])
     assert data["meta"]["runs"][0]["argv"][:2] == ["node", "app.cjs"]
 
@@ -227,7 +229,7 @@ def test_npm_script_is_profiled(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     data = json.loads((repo / ".audit" / "trace.json").read_text())
     [u] = data["unpredicted_stalls"]  # from the node child; npm's own process ran no repo code and is dropped
-    assert u["function"] == "app.crunch" and u["worst_s"] >= 0.2
+    assert u["function"] == "app.crunch" and u["worst_s"] >= 0.1
     assert all(run["argv"][:2] == ["npm", "start"] for run in data["meta"]["runs"])
 
 
