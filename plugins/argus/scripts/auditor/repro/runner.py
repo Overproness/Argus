@@ -174,26 +174,44 @@ def now() -> str:
 @contextmanager
 def _locked(path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a+") as fh:
-        try:
+    with open(path, "a+b") as fh:
+        if os.name == "nt":  # msvcrt byte-range locks work across threads and processes
+            import msvcrt
+            if path.stat().st_size == 0:
+                fh.write(b"\0")
+                fh.flush()
+            fh.seek(0)  # lock and unlock must cover the same byte at position 0
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)  # blocks ~10s, then raises
+            try:
+                yield
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
             import fcntl
             fcntl.flock(fh, fcntl.LOCK_EX)
-        except ImportError:  # Windows: best effort
-            pass
-        try:
-            yield
-        finally:
             try:
-                import fcntl
+                yield
+            finally:
                 fcntl.flock(fh, fcntl.LOCK_UN)
-            except ImportError:
-                pass
 
 
 def _atomic_write(path: Path, text: str):
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    # pid AND thread id: threads in one process share a pid, and on Windows a
+    # concurrent writer holding the same tmp path open makes os.replace fail
+    # with WinError 32. The retry covers transient locks (AV, indexer).
+    import threading
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident():x}.tmp")
     tmp.write_text(text, encoding="utf8")
-    os.replace(tmp, path)
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            import time
+            time.sleep(0.05 * (attempt + 1))
 
 
 def results_dir(out_dir: Path) -> Path:
