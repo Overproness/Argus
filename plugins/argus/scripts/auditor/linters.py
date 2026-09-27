@@ -53,8 +53,13 @@ class LintResult:
 
 def _uri_path(uri: str) -> str:
     if uri.startswith("file:"):
-        p = unquote(urlparse(uri).path)
-        return p[1:] if re.match(r"^/[A-Za-z]:", p) else p
+        u = urlparse(uri)
+        p = unquote(u.path)
+        if re.match(r"^/[A-Za-z]:", p):
+            return p[1:]
+        if re.match(r"^[A-Za-z]$", u.netloc):  # file://C:/... with the drive letter parsed as host
+            return f"{u.netloc}:{p}"
+        return p
     return unquote(uri)
 
 

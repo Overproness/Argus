@@ -22,7 +22,7 @@ def test_sarif_corroborates_and_leads(tmp_path):
     subprocess.run([*CLI, "map", FIX, "--out", tmp_path], check=True, capture_output=True)
     f = tmp_path / "x.sarif"
     f.write_text(json.dumps(sarif([
-        result("clippy::await_holding_lock", f"file://{FIX}/src/strategy.rs", 26),  # lock-across-await in run_strategy
+        result("clippy::await_holding_lock", (FIX / "src" / "strategy.rs").as_uri(), 26),  # lock-across-await in run_strategy
         result("clippy::needless_return", "src/risk.rs", 8, "note"),                # unrelated lead
         result("clippy::await_holding_lock", "src/elsewhere.rs", 3),                # no such file: still a lead
     ])))

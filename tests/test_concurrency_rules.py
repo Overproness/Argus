@@ -1,6 +1,9 @@
 """Recall on a FastAPI app with 16 planted concurrency and reliability bugs, and the rules that find them."""
 import shutil
+import sys
 import textwrap
+
+import pytest
 
 from conftest import FIXTURES
 
@@ -146,6 +149,7 @@ def test_bounded_fanout_and_joined_threads_are_fine(tmp_path):
     assert not {r for _, r in got} & {"unbounded-concurrency", "unbounded-threads"}
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows strips trailing spaces in directory names, so 'hello guys ' cannot exist next to 'hello guys'")
 def test_sibling_path_warning(tmp_path):
     real = tmp_path / "hello guys "
     (tmp_path / "hello guys").mkdir()
