@@ -1,7 +1,7 @@
 import re
 
 from ..model import HookHit
-from .base import DB, FS, NET, PROCESS, RUNTIME, SLEEP, LangSpec, R, text, walk
+from .base import CPU, DB, FS, NET, PROCESS, RUNTIME, SLEEP, LangSpec, R, text, walk
 from .common import API_NAME, PY_CTOR
 
 HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request", "send", "stream"}
@@ -468,6 +468,8 @@ SPEC = LangSpec(
           r"mkdir|rmdir|fsync|read|write)$|^shutil\.\w+$", blocking=True),
         R("file", FS, methods={"read_text", "write_text", "read_bytes", "write_bytes"}, blocking=True),
         R("runtime", RUNTIME, path=r"^asyncio\.run$|(^|\.)run_until_complete$", blocking=True),
+        R("cpu", CPU, path=r"^hashlib\.(pbkdf2_hmac|scrypt)$|^bcrypt\.(hashpw|checkpw|kdf)$|"
+          r"^(argon2|passlib\.hash)\.\w+\.(hash|verify)$|^scrypt\.(hash|encrypt)$", blocking=True),
         R("api", NET, name=API_NAME, awaited=True),
     ],
     imports=imports,

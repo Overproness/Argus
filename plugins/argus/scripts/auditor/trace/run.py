@@ -31,8 +31,11 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[2]
 BOOT_DIR = Path(__file__).resolve().parent / "py" / "boot"
 
 
-def trace_env(repo: Path, trace_dir: Path, stall_ms: float, shapes: bool) -> dict[str, str]:
+def trace_env(repo: Path, trace_dir: Path, stall_ms: float, shapes: bool,
+              inject: dict[str, float] | None = None) -> dict[str, str]:
     env = dict(os.environ)
+    if inject:
+        env["AUDIT_TRACE_INJECT"] = json.dumps(inject)  # "file:line" -> ms, read by the Python tracer
     env["AUDIT_TRACE_ROOT"] = str(repo)
     env["AUDIT_TRACE_DIR"] = str(trace_dir)
     env["AUDIT_TRACE_STALL_MS"] = str(stall_ms)
@@ -88,10 +91,26 @@ def node_env(env: dict, trace_dir: Path, run_id: str, cmd: list[str]) -> dict:
     return env
 
 
+def injection_targets(map_data: dict, ms: float) -> dict[str, float]:
+    """Python functions whose own code does blocking I/O or sleeps (not offloaded, not CPU work): where
+    injected latency shows which thread really runs them. Keyed "file:def_line" like the tracer's records."""
+    by_name = {f["qualname"]: f for f in map_data["functions"] if f.get("lang") == "python"}
+    out = {}
+    for b in map_data.get("boundaries", []):
+        f = by_name.get(b["function"])
+        if (f is None or not b.get("blocking") or b.get("context") == "offloaded"
+                or b.get("category") not in ("net", "db", "sleep", "wait", "fs")):
+            continue
+        file, line, _ = f["id"].rsplit(":", 2)
+        out[f"{file}:{line}"] = ms
+    return out
+
+
 def run(repo: Path, trace_dir: Path, cmd: list[str], stall_ms: float, shapes: bool,
-        otlp: bool = False, heartbeat: str | None = None, node: bool = False) -> int:
+        otlp: bool = False, heartbeat: str | None = None, node: bool = False,
+        inject: dict[str, float] | None = None) -> int:
     trace_dir.mkdir(parents=True, exist_ok=True)
-    env = trace_env(repo, trace_dir, stall_ms, shapes)
+    env = trace_env(repo, trace_dir, stall_ms, shapes, inject)
     stamp = f"{time.time_ns() // 1_000_000}-{os.getpid()}"  # one server process may trace twice in a second
     if node:
         env = node_env(env, trace_dir, stamp, cmd)

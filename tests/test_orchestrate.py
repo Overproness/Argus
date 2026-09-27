@@ -69,13 +69,18 @@ def test_confirmed_verdict_spawns_caller_items(audit):
                                 "hypothesis": {"trigger": "every connect fails"}}])
     q = orchestrate.queue(audit, rules={"retry-without-backoff"})
     derived = [it for it in q["items"] if it["kind"] == "derived"]
-    assert {it["function"] for it in derived} == {"svc.client.sync_all", "svc.client.handler"}
+    # handler: an entry under a deadline. sync_all calls it in a loop too, but has its own
+    # retry-without-backoff finding, which is investigated as itself rather than twice.
+    assert {it["function"] for it in derived} == {"svc.client.handler"}
+    assert "retry-without-backoff@svc.client.sync_all:18" in {i["id"] for i in q["items"]} | {
+        s["id"] for s in q["skipped"]} | set(q["deferred"])
     assert all(it["given"]["confirmed"] == fid for it in derived)
     assert all(it["id"].startswith("propagated:retry-without-backoff@") for it in derived)
 
 
 def test_rejected_edge_suppresses_dependent_findings(audit):
-    orchestrate.queue(audit, {"total": 10, "per_round": 1})
+    # issue the finding whose edge gets rejected (not the dependent one, which would then be pending)
+    orchestrate.queue(audit, {"total": 10, "per_round": 1}, rules={"blocking-in-async"})
     orchestrate.record(audit, [{"finding": "blocking-in-async@svc.client.blocking_handler:31", "verdict": "rejected",
                                 "wrong_edge": ["svc.client.blocking_handler", "svc.client.fetch"],
                                 "reason": "fetch resolves to another module"}])

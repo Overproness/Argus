@@ -26,6 +26,18 @@ from .repro.runner import status_of
 SEV_W = {"high": 5.0, "medium": 3.0, "low": 1.0, "info": 0.5}
 CONF_W = {"exact": 1.0, "scip": 1.0, "unique": 0.9, "heuristic": 0.8, "name": 0.5}
 EVID_W = {"confirmed": 1.5, "measured": 1.2, "not-verifiable": 1.0, "not-exercised": 1.0, "not-observed": 0.3}
+# Blast radius: a deadlock or a hang takes the whole service down; an N+1 makes it slower.
+RULE_W = {"lock-across-await": 1.6, "lock-order-inversion": 1.6, "sql-injection": 1.5,
+          "deadline-cannot-preempt": 1.4, "hang-reaches-entry": 1.4, "unbounded-retry": 1.3,
+          "retry-amplification": 1.3, "timeout-budget-exceeded": 1.2, "io-in-loop": 0.8, "nested-loops": 0.8}
+# Effects a trace shows directly (a stall on the predicted stack, a counted fan-out, a measured slice). When the
+# trace confirmed them there is nothing left for an investigator to prove, so no budget is spent on them.
+TRACE_PROVES = {"blocking-in-async", "deadline-cannot-preempt", "cpu-heavy-in-async", "sync-over-async",
+                "io-in-loop", "runblocking-in-suspend"}
+# Effects that only appear when a dependency is slow: a fast test double hides them, so a plain "not-observed"
+# says nothing. It counts only when the trace injected latency and the code still did not stall.
+LATENCY_RULES = {"blocking-in-async", "cpu-heavy-in-async", "deadline-cannot-preempt", "hang-reaches-entry",
+                 "io-without-timeout", "timeout-budget-exceeded", "sync-over-async", "runblocking-in-suspend"}
 VERDICTS = {"confirmed", "rejected", "inconclusive"}
 MAX_DERIVED_PER_VERDICT = 3
 MAX_PER_ITEM = 5  # findings one investigator handles in one function
@@ -74,9 +86,9 @@ class State:
         self.evidence = {finding_id(f): f["evidence"] for f in (self.trace or {}).get("findings", [])}
         self.hotspot = {h["function"]: h["score"] for h in self.map.get("hotspots", [])}
         self.lang_of = {fn["qualname"]: fn["lang"] for fn in self.map["functions"]}
-        self.callers = defaultdict(list)  # callee qualname -> [(caller, line, deadline)]
+        self.callers = defaultdict(list)  # callee qualname -> [(caller, line, deadline, in a loop)]
         for e in self.map["edges"]:
-            self.callers[e["callee"]].append((e["caller"], e["line"], e.get("deadline_s")))
+            self.callers[e["callee"]].append((e["caller"], e["line"], e.get("deadline_s"), bool(e.get("loop_depth"))))
         self.entries = {fn["qualname"] for fn in self.map["functions"] if fn.get("is_entry")}
 
     def save_ledger(self):
@@ -117,7 +129,8 @@ def _suppressed_by(item: dict, wrong_edges: list[tuple[str, str, str]]) -> str |
 
 def _score(item: dict, st: State) -> float:
     ev = (item.get("trace_evidence") or {}).get("status")
-    s = SEV_W.get(item["severity"], 1.0) * CONF_W.get(item.get("confidence", "heuristic"), 0.8) * EVID_W.get(ev, 1.0)
+    s = (SEV_W.get(item["severity"], 1.0) * CONF_W.get(item.get("confidence", "heuristic"), 0.8)
+         * EVID_W.get(ev, 1.0) * RULE_W.get(item["rule"].split(":")[-1], 1.0))
     return round(s + min(st.hotspot.get(item["function"], 0.0) / 10.0, 1.0), 3)
 
 
@@ -126,10 +139,14 @@ def _derive(st: State, fid: str, v: dict) -> list[dict]:
     rule, rest = fid.split("@", 1)
     function = rest.rsplit(":", 1)[0]
     callers = st.callers.get(function, [])
-    # Prefer callers where the effect matters most: entry points, deadlines, hotspots.
+    # Only callers where the effect changes or surfaces: an entry point (what users hit), a deadline (which the
+    # effect may blow) or a loop (which multiplies it). A caller with its own finding of this rule is
+    # investigated as itself, not again here.
+    own = {(f["rule"], f["function"]) for f in st.map["findings"]}
+    callers = [c for c in callers if (c[0] in st.entries or c[2] is not None or c[3]) and (rule, c[0]) not in own]
     callers = sorted(callers, key=lambda c: (c[0] not in st.entries, c[2] is None, -st.hotspot.get(c[0], 0.0)))
     out = []
-    for caller, line, deadline in callers[:MAX_DERIVED_PER_VERDICT]:
+    for caller, line, deadline, _ in callers[:MAX_DERIVED_PER_VERDICT]:
         hyp = v.get("hypothesis") or {}
         out.append({
             "id": f"propagated:{rule}@{caller}:{line}", "kind": "derived", "rule": f"propagated:{rule}",
@@ -216,7 +233,11 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
             reason = "low severity"
         elif (sup := _suppressed_by(c, wrong_edges)) is not None:
             reason = f"suppressed: its chain uses the call edge rejected in {sup}"
-        elif (c.get("trace_evidence") or {}).get("status") == "not-observed" and not rules:
+        elif ((ev := c.get("trace_evidence") or {}).get("status") in ("confirmed", "measured")
+              and c["rule"] in TRACE_PROVES and not rules):
+            reason = f"trace: {ev['status']} at run time ({(ev.get('detail') or '')[:120]}); no investigation needed"
+        elif (ev.get("status") == "not-observed" and not rules
+              and (ev.get("injected") or c["rule"] not in LATENCY_RULES)):
             reason = "trace: not-observed under the recorded workload"
         c["score"] = _score(c, st)
         if reason:
@@ -294,6 +315,20 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
 
 # --- record --------------------------------------------------------------------------------
 
+STALL_RULES = {"blocking-in-async", "cpu-heavy-in-async", "deadline-cannot-preempt", "sync-over-async"}
+MIN_STALL_S = 0.05
+
+
+def _contradicts(fid: str, v: dict) -> str | None:
+    """A confirmed stall whose own measurement shows the loop was never blocked is not confirmed."""
+    rule = fid.split("@", 1)[0].split(":")[-1]
+    lag = (v.get("evidence") or {}).get("max_lag_s")
+    if rule in STALL_RULES and isinstance(lag, (int, float)) and lag < MIN_STALL_S:
+        return (f"confirmed as `{rule}`, but the reproduction's own loop monitor measured max_lag_s={lag}: the loop "
+                "was not blocked. Re-run with the blocking call inside the monitored block")
+    return None
+
+
 def record(out_dir: Path, verdicts: list[dict]) -> dict:
     st = State(out_dir)
     led = st.ledger
@@ -333,7 +368,13 @@ def record(out_dir: Path, verdicts: list[dict]) -> dict:
             continue
         entry = {**v, "round": round_of.get(fid), "recorded_at": now(),
                  "repro_check": st.repro_status(fid, v.get("repro_file"))}
-        if verdict == "confirmed" and entry["repro_check"] != "passed":
+        contra = _contradicts(fid, v) if verdict == "confirmed" else None
+        if contra:
+            entry["verdict"] = "inconclusive"
+            entry["blocked_by"] = "evidence-contradicts"
+            entry["note"] = contra
+            out["downgraded"].append(fid)
+        elif verdict == "confirmed" and entry["repro_check"] != "passed":
             entry["verdict"] = "inconclusive"
             entry["blocked_by"] = "repro-check"
             entry["note"] = (f"investigator said confirmed, but the latest `repro` run of this finding's own test shows "

@@ -3,7 +3,7 @@
 
   auditor_cli.py map   <repo> [--out DIR] [--include-tests] [--no-scip]
   auditor_cli.py index <repo> [--out DIR] [--only rust-analyzer,scip-python,...]
-  auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--no-shapes] [--assume ARG=N]
+  auditor_cli.py trace <repo> [--out DIR] [--stall-ms 100] [--inject-latency MS] [--no-shapes] [--assume ARG=N]
                               [--otlp] [--heartbeat REGEX] [--node | --no-node] -- <command...>
   auditor_cli.py trace-import <repo> [--otlp-file spans.json] [--profile x.cpuprofile|x.speedscope.json] [--chrome trace.json]
                                      [--coverage v8-coverage-dir] [--stall-ms 100] [--assume ARG=N]
@@ -52,6 +52,10 @@ def main() -> int:
     stall_help = "how long the loop must be blocked to count as a stall"
     tp.add_argument("--stall-ms", type=float, default=100, help=stall_help)
     tp.add_argument("--no-shapes", action="store_true", help="do not record argument sizes")
+    tp.add_argument("--inject-latency", type=float, default=0, metavar="MS",
+                    help="Python: sleep MS on entry to every function the map says does blocking I/O, so a fast "
+                         "test double still shows which of them block the event loop (a stall on the exact "
+                         "stack) and which run on a worker thread (none). 0 = off")
     assume_help = "project cost at this input size: ARG=N, FUNCTION=N, FUNCTION.ARG=N or *=N (repeatable)"
     tp.add_argument("--assume", action="append", default=[], metavar="NAME=N", help=assume_help)
     tp.add_argument("--otlp", action="store_true",
@@ -191,8 +195,13 @@ def main() -> int:
             node = (args.node or trace_run.is_node_command(command)) and not args.no_node
             if node:
                 print("node: sampling profile (--cpu-prof) and exact call counts (NODE_V8_COVERAGE) on")
+            inject = None
+            if args.inject_latency > 0:
+                ms = max(args.inject_latency, args.stall_ms * 1.5)  # must cross the stall threshold to show
+                inject = trace_run.injection_targets(json.loads(map_path.read_text(encoding="utf8")), ms)
+                print(f"inject: {ms:g} ms on entry to {len(inject)} blocking function(s)")
             rc = trace_run.run(repo, trace_dir, command, args.stall_ms, not args.no_shapes,
-                               otlp=args.otlp, heartbeat=args.heartbeat, node=node)
+                               otlp=args.otlp, heartbeat=args.heartbeat, node=node, inject=inject)
             print(f"command exited {rc}")
         if args.cmd == "trace-import":
             if not (args.otlp_file or args.profile or args.coverage or args.chrome):

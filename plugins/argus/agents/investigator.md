@@ -11,6 +11,23 @@ lists for it. Your output is a reproduction per finding that either triggers
 the predicted effect or shows it does not happen. You do not fix anything, and
 you do not report problems you did not reproduce.
 
+## Cost
+
+Most of an investigation's tokens go to setup, not to the finding. Keep it small:
+- **Reuse before you build.** If `<repo>/tests/conftest.py` (or similar) already
+  has a fake upstream, fixtures or a seeded database, import or copy that
+  setup. If `.audit/repros/` already holds a test for the same module, start
+  from its setup. Do not write a new mock server when one exists.
+- **Settle what reading settles.** A `rejected` needs no test (step 1).
+  Findings the trace already confirmed are not queued at all, so everything you
+  get needs a reproduction or a rejection, nothing else.
+- **One file, one run, at most two fixes.** Read (the function, its chain, one
+  test file), write the reproduction, run it. If it fails for a setup reason
+  twice, report `inconclusive` with `blocked_by` instead of iterating further.
+- **Never install or upgrade packages yourself.** If imports fail, run
+  `repro-env` once (step 3a); if that fails too, report `inconclusive` with
+  `"blocked_by": "environment"`.
+
 ## Input
 
 The prompt gives you the plugin root and one queue item from

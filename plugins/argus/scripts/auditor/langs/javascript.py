@@ -2,7 +2,7 @@
 import re
 from dataclasses import replace
 
-from .base import DB, FS, NET, PROCESS, WAIT, LangSpec, R, text, walk
+from .base import CPU, DB, FS, NET, PROCESS, WAIT, LangSpec, R, text, walk
 from .common import API_NAME, CTOR
 
 
@@ -89,6 +89,8 @@ SPEC = LangSpec(
     rules=[
         R("fs", FS, path=r"^(fs|fs-extra|graceful-fs)\.\w+Sync$", blocking=True),
         R("process", PROCESS, path=r"^child_process\.(execSync|execFileSync|spawnSync)$", blocking=True),
+        R("cpu", CPU, path=r"^crypto\.(pbkdf2Sync|scryptSync|generateKeyPairSync)$|^bcrypt(js)?\.(hashSync|compareSync)$",
+          blocking=True),
         R("wait", WAIT, path=r"^Atomics\.wait$", blocking=True),
         R("db", DB, methods={"run", "get", "all", "exec", "iterate"}, receiver=r"(?i)stmt|db|statement|sqlite",
           imp=r"^better-sqlite3$", blocking=True),
