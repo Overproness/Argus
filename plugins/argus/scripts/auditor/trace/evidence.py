@@ -66,6 +66,12 @@ class Evidence:
         self.counts: dict[Key, int] = defaultdict(int)
         for c in trace.counts:
             self.counts[c.key] += c.count
+        # Functions slowed on purpose (trace --inject-latency): "file:line" -> seconds, over all runs.
+        self.injected: dict[Key, float] = {}
+        for r in trace.runs:
+            for k, v in json.loads(r.get("inject") or "{}").items():
+                file, _, line = k.rpartition(":")
+                self.injected[(file, int(line))] = float(v)
 
     def _sampled(self, key: Key) -> bool:
         calls = self.calls_by_key.get(key, [])
@@ -162,13 +168,34 @@ class Evidence:
         chain = self._chain_keys(f)
         leaf = chain[-1] if chain else fkey
 
-        if rule in ("blocking-in-async", "sync-over-async", "runblocking-in-suspend", "await-in-loop"):
+        if rule in ("blocking-in-async", "sync-over-async", "runblocking-in-suspend", "await-in-loop",
+                    "cpu-heavy-in-async", "deadline-cannot-preempt"):
             hits = [s for s in self.stalls_by_leaf.get(leaf, []) if fkey in {(a, b) for a, b, _ in s.stack}]
+            if not hits and rule in ("cpu-heavy-in-async", "deadline-cannot-preempt"):
+                # the stall may sit anywhere under this function (the chain's leaf is a library call)
+                hits = [s for s in self.trace.stalls if fkey in {(a, b) for a, b, _ in s.stack}]
+            inj = self.injected.get(leaf)
+            how = f" with {_fmt(inj)} of latency injected at `{self.qualname_by_key.get(leaf, '?')}`" if inj else ""
             if hits:
                 worst = max(hits, key=lambda s: s.dur)
-                return {"status": "confirmed", "stats": st,
-                        "detail": f"{len(hits)} stall(s) on the predicted stack, worst {_fmt(worst.dur)}: "
-                                  + " → ".join(q for _, _, q in worst.stack)}
+                what = ("the deadline around it could not interrupt the stall"
+                        if rule == "deadline-cannot-preempt" else "the event loop was blocked")
+                return {"status": "confirmed", "stats": st, "injected": bool(inj),
+                        "detail": f"{len(hits)} stall(s) on the predicted stack{how}, worst {_fmt(worst.dur)} "
+                                  f"({what}): " + " → ".join(q for _, _, q in worst.stack)}
+            if rule == "cpu-heavy-in-async":
+                slices = [(self.stats(k)["max_self_slice_s"], k) for k in (chain or [fkey]) if self.stats(k)]
+                worst, where = max(slices, default=(0.0, fkey))
+                if worst >= self.threshold / 2:
+                    return {"status": "measured", "stats": st,
+                            "detail": f"`{self.qualname_by_key.get(where, '?')}` held the loop thread for "
+                                      f"{_fmt(worst)} in one uninterrupted slice (stall threshold {_fmt(self.threshold)}); "
+                                      "every concurrent request waits that long per call"}
+            if inj and self.calls_by_key.get(leaf):
+                return {"status": "not-observed", "stats": st, "injected": True,
+                        "detail": f"{_fmt(inj)} was injected at `{self.qualname_by_key.get(leaf, '?')}` and it ran "
+                                  f"{len(self.calls_by_key[leaf])}×, but never stalled the loop on this stack: it "
+                                  "runs off the loop thread here (offloaded, or only from sync code)"}
             ran = self.calls_by_key.get(fkey, [])
             if ran and all(c.pid in self.stall_blind_pids for c in ran):
                 return {"status": "not-verifiable", "stats": st,
@@ -208,6 +235,13 @@ class Evidence:
                                   + ("; cost grows with the collection" if ratio > 1 else "")}
             per = [self._descendants_named(c, leaf) for c in self.calls_by_key[fkey]]
             mx = max(per)
+            if mx <= 1 and len(chain) > 2:
+                # The leaf may run on a worker thread (to_thread), which has its own call stack: count the
+                # direct callee in the loop instead, which runs on this activation's thread.
+                hop = chain[1]
+                per_hop = [self._descendants_named(c, hop) for c in self.calls_by_key[fkey]]
+                if max(per_hop) > 1:
+                    leaf, leaf_name, per, mx = hop, self.qualname_by_key.get(hop, "?"), per_hop, max(per_hop)
             if mx > 1:
                 return {"status": "confirmed", "stats": st,
                         "detail": f"`{leaf_name}` ran up to {mx}× per activation of `{f['function']}` "

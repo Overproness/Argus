@@ -54,7 +54,11 @@ RULES: dict[str, tuple[str, str, dict[str, re.Pattern]]] = {
     }),
     "unbounded-query": ("low", "Loads every row of a table or collection into memory at once. It works on the "
                                "test data and fails when the table grows. Paginate or stream.", {
-        "python": _r(r"\.fetchall\s*\(\s*\)|\.objects\.all\s*\(\s*\)\s*(?!\.)|SELECT\s+\*\s+FROM\s+\w+\s*['\"]"),
+        # A literal SELECT with no WHERE/LIMIT (aggregates excluded), or `.fetchall()` -- except in a generic query
+        # helper that takes its SQL as a parameter: it fetches whatever its caller asked for, so the caller that
+        # wrote the SQL is the lead (see _GENERIC_SQL_HELPER).
+        "python": _r(r"""["'](?i:\s*select)\b(?![^"']*(?i:\blimit\b|\bwhere\b|\bexists\b|\b(?:count|sum|max|min|avg)\s*\())"""
+                     r"""[^"']*\b(?i:from)\s+\w+[^"']*["']|\.objects\.all\s*\(\s*\)\s*(?!\.)|\.fetchall\s*\(\s*\)"""),
         "rust": _r(r"\.fetch_all\s*\(|\.find\s*\(\s*doc!\s*\{\s*\}"),
         "java": _r(r"\.findAll\s*\(\s*\)|\.getResultList\s*\(\s*\)"),
         "javascript": _r(r"\.find\s*\(\s*\{\s*\}\s*\)|\.findMany\s*\(\s*\)|\.findAll\s*\(\s*\)"),
@@ -70,7 +74,9 @@ RULES: dict[str, tuple[str, str, dict[str, re.Pattern]]] = {
                               "literal). A caller-controlled value changes the query itself: rows leak, filters are "
                               "bypassed, tables are altered. Pass values as bind parameters.", {
         "python": _r(r"""\.(execute|executemany|executescript|raw|exec_driver_sql)\s*\(\s*(f(["'])(?:(?!\3).)*\{|"""
-                     r"""(["'])(?:(?!\4).)*\4\s*(%\s*[\w(]|\+\s*\w|\.format\())|\btext\s*\(\s*f(["'])(?:(?!\6).)*\{"""),
+                     r"""(["'])(?:(?!\4).)*\4\s*(%\s*[\w(]|\+\s*\w|\.format\())|\btext\s*\(\s*f(["'])(?:(?!\6).)*\{|"""
+                     # any helper handed an f-string that is SQL (`query(f"select ... {term}")`)
+                     r"""\(\s*f(["'])\s*(?i:select|insert|update|delete|with)\b(?:(?!\7).)*\{"""),
         "javascript": _r(r"\.(query|execute|raw|\$queryRawUnsafe|\$executeRawUnsafe)\s*\(\s*(`[^`]*\$\{|['\"][^'\"]*['\"]\s*\+\s*\w)"),
         "typescript": _r(r"\.(query|execute|raw|\$queryRawUnsafe|\$executeRawUnsafe)\s*\(\s*(`[^`]*\$\{|['\"][^'\"]*['\"]\s*\+\s*\w)"),
         "java": _r(r"\.(executeQuery|executeUpdate|execute|createQuery|createNativeQuery|prepareStatement)\s*\(\s*\"[^\"]*\"\s*\+\s*\w"),
@@ -92,6 +98,20 @@ _ASSIGN_AWAIT = {
 }
 _SEQ_MSG = ("Consecutive awaits where the second does not use the first's result run one after the other. "
             "If the calls are independent, start them together (join/gather/Promise.all/WhenAll) to cut the wait to the slower one.")
+# Interpolations that build SQL structure from trusted parts (`in ({placeholders})`), not values.
+_SAFE_SQL_PART = re.compile(r"(?i)^(placeholders?|qmarks?|marks|params?_sql|binds?|columns?|cols|fields|table\w*|"
+                            r"order_by|sort_col|where_sql|clause|n)$")
+_GENERIC_SQL_HELPER = re.compile(r"[(,]\s*(sql|query|stmt|statement|sql_text)\s*[,:)=]")
+_WALLCLOCK_SET = {
+    "python": re.compile(r"(?:^|\s)((?:self\.)?\w+)\s*=\s*time\.time\s*\(\s*\)"),
+    "javascript": re.compile(r"(?:^|\s)(?:const|let|var)?\s*((?:this\.)?\w+)\s*=\s*Date\.now\s*\(\s*\)"),
+    "typescript": re.compile(r"(?:^|\s)(?:const|let|var)?\s*((?:this\.)?\w+)\s*=\s*Date\.now\s*\(\s*\)"),
+}
+_MODULE_REGEX = {
+    "python": re.compile(r"^([A-Z_][A-Z0-9_]*)\s*=\s*re\.compile\s*\((.+)", re.M),
+    "javascript": re.compile(r"^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(/.+/[a-z]*|new RegExp\(.+)", re.M),
+    "typescript": re.compile(r"^(?:export\s+)?(?:const|let|var)\s+(\w+)\s*=\s*(/.+/[a-z]*|new RegExp\(.+)", re.M),
+}
 _RETRYISH = re.compile(r"(?i)\b(retry|retries|attempt|attempts|backoff)\b")
 _BACKOFF = re.compile(r"(?i)backoff|\*\*\s*\w|\bpow\s*\(|<<|exponential|\*=\s*2")
 _JITTER = re.compile(r"(?i)jitter|random|\brand\b|rng|uniform")
@@ -102,17 +122,66 @@ def _lines(body) -> list[tuple[int, str]]:
     return [(base + i, ln) for i, ln in enumerate(text(body).split("\n")) if not COMMENT.match(ln)]
 
 
+def _signature(fn_node, body) -> list[tuple[int, str]]:
+    """The declaration up to the body: parameter and return types count (`unit_price: float`)."""
+    if body is None or body.start_byte <= fn_node.start_byte:
+        return []
+    head = fn_node.text[: body.start_byte - fn_node.start_byte].decode("utf8", "replace")
+    base = fn_node.start_point[0] + 1
+    return [(base + i, ln) for i, ln in enumerate(head.split("\n"))]
+
+
+def _module_regexes(spec, fn_node) -> dict[str, str]:
+    """Module-level regex constants (`COUPON = re.compile(r"...")`): name -> pattern text."""
+    rx = _MODULE_REGEX.get(spec.name)
+    if rx is None:
+        return {}
+    root = fn_node
+    while root.parent is not None:
+        root = root.parent
+    return {m.group(1): m.group(2) for m in rx.finditer(text(root))}
+
+
+def _sql_values_interpolated(line: str) -> bool:
+    names = re.findall(r"\{([^{}:!]+)[^{}]*\}", line)
+    return any(not _SAFE_SQL_PART.match(n.strip().split(".")[-1]) for n in names) if names else True
+
+
 def pattern_rules(spec, fn_node, body, is_async) -> list[HookHit]:
     lines = _lines(body)
+    sig = _signature(fn_node, body)
     hits: list[HookHit] = []
     for rule, (sev, msg, table) in RULES.items():
         rx = table.get(spec.name, table.get("*"))
         if rx is None:
             continue
-        for ln, s in lines:
+        for ln, s in (sig + lines if rule == "float-money" else lines):
             if len(s) < 400 and rx.search(s):
+                if rule == "sql-injection" and not _sql_values_interpolated(s):
+                    continue  # only structure (`in ({placeholders})`) is formatted in; values are bound
+                if (rule == "unbounded-query" and ".fetchall" in s and "select" not in s.lower()
+                        and any(_GENERIC_SQL_HELPER.search(h) for _, h in sig)):
+                    continue  # a helper running its caller's SQL
                 hits.append(HookHit(rule, SEVERITY_BY_LANG.get((rule, spec.name), sev), ln, msg))
                 break  # one lead per function and rule: enough to send the investigator there
+    # A module-level regex is matched where it is used: that is the function to investigate.
+    redos = RULES["redos-regex"][2]["*"]
+    for name, pat in _module_regexes(spec, fn_node).items():
+        if not redos.search(pat[:400]):
+            continue
+        use = next(((ln, s) for ln, s in lines if re.search(rf"\b{re.escape(name)}\b", s)), None)
+        if use and not any(h.rule == "redos-regex" for h in hits):
+            hits.append(HookHit("redos-regex", RULES["redos-regex"][0], use[0],
+                                f"`{name}` ({pat.strip()[:60]}) " + RULES["redos-regex"][1]))
+    # Wall clock read into a variable, then subtracted: `now = time.time()` ... `last + interval - now`.
+    wset = _WALLCLOCK_SET.get(spec.name)
+    if wset is not None and not any(h.rule == "wallclock-interval" for h in hits):
+        names = {m.group(1) for _, s in lines for m in [wset.search(s)] if m}
+        for ln, s in lines:
+            if any(re.search(rf"-\s*{re.escape(v)}\b|\b{re.escape(v)}\s*-(?!=)", s) for v in names):
+                hits.append(HookHit("wallclock-interval", RULES["wallclock-interval"][0], ln,
+                                    RULES["wallclock-interval"][1]))
+                break
     rx = _ASSIGN_AWAIT.get(spec.name)
     if rx is not None and is_async:
         prev = None

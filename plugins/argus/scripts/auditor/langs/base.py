@@ -8,6 +8,7 @@ from typing import Callable, Iterator
 from tree_sitter import Node
 
 NET, DB, FS, SLEEP, PROCESS, WAIT, RUNTIME = "net", "db", "fs", "sleep", "process", "wait", "runtime"
+CPU = "cpu"  # deliberately slow computation (password hashing, key derivation): blocks without doing I/O
 
 BASE_COMMON_METHODS = frozenset({
     "new", "get", "set", "insert", "remove", "push", "pop", "len", "is_empty", "clone",

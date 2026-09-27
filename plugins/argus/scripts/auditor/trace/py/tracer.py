@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import atexit
 import json
+import linecache
 import os
+import re
 import sys
 import threading
 import time
@@ -51,8 +53,22 @@ def _shape(v):
         return None
 
 
+def _def_line(path: str, first: int, name: str) -> int:
+    """The `def` line of a function. `co_firstlineno` of a decorated function is its first decorator's line,
+    while the static map (and every report) names functions by the `def` line."""
+    rx = re.compile(rf"^\s*(async\s+)?def\s+{re.escape(name)}\b")
+    for ln in range(first, first + 60):
+        src = linecache.getline(path, ln)
+        if not src:
+            break
+        if rx.match(src):
+            return ln
+    return first
+
+
 class Tracer:
-    def __init__(self, root: Path, writer: TraceWriter, stall_threshold: float, shapes: bool):
+    def __init__(self, root: Path, writer: TraceWriter, stall_threshold: float, shapes: bool,
+                 inject: dict[str, float] | None = None, inject_max: int = 25):
         self.root = str(root.resolve()).replace("\\", "/").rstrip("/") + "/"
         self.writer = writer
         self.threshold = stall_threshold
@@ -62,6 +78,12 @@ class Tracer:
         self._suspended: dict[int, _Act] = {}  # id(frame) of a paused coroutine/generator
         self._seq = 0
         self._lock = threading.Lock()
+        # Latency injection: "file:def_line" -> seconds slept on entry to that function, for the first
+        # `inject_max` activations. A sync function holding blocking I/O then stalls whatever thread runs it:
+        # the asyncio loop thread (a stall on the exact stack: blocking-in-async proven) or a worker (no stall).
+        self.inject = inject or {}
+        self.inject_max = inject_max
+        self._injected: dict[str, int] = {}
 
     # --- code filtering -----------------------------------------------------
     def info(self, code):
@@ -74,7 +96,8 @@ class Tracer:
         if code.co_flags & 0x1 and not code.co_name.startswith("<") and not code.co_filename.startswith("<"):
             path = os.path.abspath(code.co_filename).replace("\\", "/")
             if path.startswith(self.root) and not any(d in path for d in NOISE_DIRS):
-                res = (path[len(self.root):], code.co_firstlineno, bool(code.co_flags & CO_COROUTINE))
+                res = (path[len(self.root):], _def_line(path, code.co_firstlineno, code.co_name),
+                       bool(code.co_flags & CO_COROUTINE))
         self._info[code] = res
         return res
 
@@ -101,6 +124,12 @@ class Tracer:
         act.slice_start = now
         act.child_in_slice = 0.0
         stack.append(act)
+        if self.inject and not resumed:
+            k = f"{inf[0]}:{inf[1]}"
+            d = self.inject.get(k)
+            if d and self._injected.get(k, 0) < self.inject_max:
+                self._injected[k] = self._injected.get(k, 0) + 1
+                time.sleep(d)  # counted in this activation's own slice, on the thread that called it
         return True
 
     def exit(self, frame, code, suspended: bool):
@@ -200,15 +229,17 @@ def _install_monitoring(tr: Tracer):
     return lambda: m.set_events(tid, 0)
 
 
-def install(root: Path, out_dir: Path, stall_threshold: float = 0.1, shapes: bool = True) -> Tracer:
+def install(root: Path, out_dir: Path, stall_threshold: float = 0.1, shapes: bool = True,
+            inject: dict[str, float] | None = None) -> Tracer:
     if not hasattr(sys, "monitoring"):
         raise RuntimeError("argus tracing needs Python 3.12+ (sys.monitoring)")
     out_dir.mkdir(parents=True, exist_ok=True)
     writer = TraceWriter(out_dir / f"{os.getpid()}-{int(time.time())}.db", {
         "lang": "python", "pid": str(os.getpid()), "root": str(root), "argv": json.dumps(sys.argv),
         "python": sys.version.split()[0], "started": str(time.time()), "stall_threshold": str(stall_threshold),
+        "inject": json.dumps(inject or {}),
     })
-    tr = Tracer(root, writer, stall_threshold, shapes)
+    tr = Tracer(root, writer, stall_threshold, shapes, inject)
     stop = _install_monitoring(tr)
 
     def finish():
@@ -222,5 +253,6 @@ def install_from_env() -> Tracer | None:
     root, out = os.environ.get("AUDIT_TRACE_ROOT"), os.environ.get("AUDIT_TRACE_DIR")
     if not root or not out:
         return None
+    inject = {k: float(v) / 1000 for k, v in json.loads(os.environ.get("AUDIT_TRACE_INJECT") or "{}").items()}
     return install(Path(root), Path(out), float(os.environ.get("AUDIT_TRACE_STALL_MS", "100")) / 1000,
-                   os.environ.get("AUDIT_TRACE_SHAPES", "1") != "0")
+                   os.environ.get("AUDIT_TRACE_SHAPES", "1") != "0", inject)

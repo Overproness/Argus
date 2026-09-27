@@ -30,6 +30,67 @@ cases:
       - {rule: recursion, function: "rust_trader::risk::exposure", file: src/risk.rs, line: 6}
       - {rule: nested-loops, function: "rust_trader::risk::correlation_matrix", file: src/risk.rs, line: 14}
 
+  - id: orderdesk-seeded-service
+    kind: local
+    path: tests/fixtures/orderdesk
+    lang: python
+    note: >-
+      Synthetic but realistic FastAPI service: 22 seeded defects across Argus's Python rules, written with no
+      hint comments, plus 13 decoys (correct code shaped like a bug). A plain LLM audit prompt found 21/22 of
+      the seeds on this repo, so it is the bar the static map has to clear. Most misses here are resolution
+      gaps: timeouts and retry counts held in settings constants, I/O reached through asyncio.to_thread,
+      methods called on module-level instances, patterns outside function bodies.
+    expected:
+      - {rule: blocking-in-async, function: "shop.services.orders.OrderService.build_quote", file: shop/services/orders.py}
+      - {rule: blocking-in-async, function: "shop.services.orders.OrderService._reserve_and_price", file: shop/services/orders.py}
+      - {rule: io-without-timeout, function: "shop.clients.pricing.PricingClient.price_for", file: shop/clients/pricing.py}
+      - {rule: hang-reaches-entry, function: "shop.api.quote", file: shop/api.py}
+      - {rule: deadline-cannot-preempt, function: "shop.services.orders.OrderService.checkout", file: shop/services/orders.py}
+      - {rule: timeout-budget-exceeded, function: "shop.api.stock", file: shop/api.py}
+      - {rule: retry-amplification, function: "shop.worker.replay_pending", file: shop/worker.py}
+      - {rule: unbounded-retry, function: "shop.worker.price_feed_loop", file: shop/worker.py}
+      - {rule: backoff-without-jitter, function: "shop.clients.inventory.InventoryClient._request", file: shop/clients/inventory.py}
+      - {rule: io-in-loop, function: "shop.services.orders.OrderService.order_summary", file: shop/services/orders.py}
+      - {rule: io-in-loop, function: "shop.services.orders.OrderService.reserve_items", file: shop/services/orders.py}
+      - {rule: io-in-loop, function: "shop.clients.pricing.PricingClient.quote", file: shop/clients/pricing.py}
+      - {rule: lock-across-await, function: "shop.cache.TTLCache.get_or_load", file: shop/cache.py}
+      - {rule: fire-and-forget-task, function: "shop.services.orders.OrderService._reserve_and_price", file: shop/services/orders.py}
+      - {rule: unbounded-channel, function: "shop.services.events.EventBus.__init__", file: shop/services/events.py}
+      - {rule: cpu-heavy-in-async, function: "shop.services.auth.login", file: shop/services/auth.py}
+      - {rule: float-money, function: "shop.money.line_total", file: shop/money.py}
+      - {rule: wallclock-interval, function: "shop.ratelimit.Throttle.wait", file: shop/ratelimit.py}
+      - {rule: blocking-in-async, function: "shop.api.quote", file: shop/api.py}
+      - {rule: nested-loops, function: "shop.services.catalog.related_products", file: shop/services/catalog.py}
+      - {rule: recursion, function: "shop.services.catalog.category_path", file: shop/services/catalog.py}
+      - {rule: unbounded-query, function: "shop.db.all_orders", file: shop/db.py}
+      - {rule: blocking-in-async, function: "shop.api.export_orders", file: shop/api.py}
+      - {rule: sequential-awaits, function: "shop.api.product_page", file: shop/api.py}
+      # outside the classic reliability rules, but patterns Argus has: SQL built by an f-string, a nested-quantifier regex
+      - {rule: sql-injection, function: "shop.db.search_products", file: shop/db.py}
+      - {rule: redos-regex, function: "shop.money.coupon_discount", file: shop/money.py}
+    must_be_absent:
+      # decoys: correct code shaped like a bug
+      - {rule: io-without-timeout, function: "shop.clients.pricing.PricingClient._price_bounded"}
+      - {rule: blocking-in-async, function: "shop.clients.pricing.PricingClient.price_for_async"}
+      - {rule: io-in-loop, function: "shop.db.get_products"}
+      - {rule: lock-across-await, function: "shop.clients.inventory.InventoryClient._auth_header"}
+      - {rule: recursion, function: "shop.services.catalog.render_menu"}
+      - {rule: io-in-loop, function: "scripts.seed_db.main"}
+      - {rule: nested-loops, function: "shop.services.catalog.delivery_grid"}
+      - {rule: io-in-loop, function: "shop.clients.reviews.fetch_reviews"}
+      - {rule: backoff-without-jitter, function: "shop.clients.reviews.fetch_reviews"}
+      - {rule: float-money, function: "shop.invoices.invoice_total"}
+      - {rule: io-in-loop, function: "shop.db._query"}
+      - {rule: unbounded-channel, function: "shop.services.events.AuditLog.__init__"}
+      - {rule: io-in-loop, function: "shop.db.add_order_lines"}
+      - {rule: io-in-loop, function: "shop.db.update_prices"}
+      # misreadings seen on this repo: retry loops read as N+1 or O(n^2), delegation read as recursion
+      - {rule: io-in-loop, function: "shop.clients.inventory.InventoryClient._request"}
+      - {rule: nested-loops, function: "shop.services.orders.OrderService.reserve_items"}
+      - {rule: nested-loops, function: "shop.worker.replay_pending"}
+      - {rule: recursion, function: "shop.clients.inventory.InventoryClient.aclose"}
+      - {rule: unbounded-query, function: "shop.db._query"}
+
   - id: py_runtime-nplusone-and-timeout
     kind: local
     path: tests/fixtures/py_runtime

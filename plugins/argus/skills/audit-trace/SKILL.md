@@ -107,6 +107,14 @@ python "<plugin-root>/scripts/auditor_cli.py" trace-import "<repo>" [--otlp-file
   through `NODE_OPTIONS` and `NODE_V8_COVERAGE`, child processes included.
 - `--stall-ms 100` sets what counts as a stall. For heartbeats, a stall is a
   gap this much longer than the usual interval.
+- `--inject-latency MS` (Python): sleep MS on entry to every function the map
+  says does blocking I/O. A test double answers in microseconds, so without it
+  a blocking call on the event loop never crosses the stall threshold. With it,
+  a stall on the predicted stack confirms `blocking-in-async` and
+  `deadline-cannot-preempt`, and no stall after injection is real evidence
+  that the call runs off the loop thread. It slows the workload by MS per
+  injected call (capped at 25 activations per function); raise any test
+  timeouts it trips.
 - `--no-shapes` skips argument-size capture.
 - Runs accumulate: each `trace` or `trace-import` adds to `.audit/trace/` and
   the report covers all of them. Delete `.audit/trace/` to start over, for

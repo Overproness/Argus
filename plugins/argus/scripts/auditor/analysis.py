@@ -12,9 +12,10 @@ from pathlib import Path, PurePosixPath
 from . import effects
 from .extract import FileExtractor
 from .langs import SPECS, spec_for
-from .langs.base import DB, FS, NET, LangSpec
+from .langs.base import CPU, DB, FS, NET, LangSpec
 from .model import Boundary, Call, Edge, FileCtx, Finding, Function, HookHit
 from .scip import Precise
+from .timeouts import collect_constants, set_constants
 
 SKIP_DIRS = {
     ".git", ".hg", ".svn", ".audit", "node_modules", "target", "vendor", "dist", "build", "out",
@@ -35,7 +36,10 @@ DOWNGRADE = {"high": "medium", "medium": "low", "low": "low", "info": "info"}
 # name: several candidates remain.
 CONF_RANK = {"scip": 0, "exact": 0, "unique": 1, "heuristic": 1, "name": 2}
 # Short local syscalls block briefly; network, sleeps, processes and waits can block for seconds.
-BLOCK_SEVERITY = {FS: "medium"}
+BLOCK_SEVERITY = {FS: "medium", CPU: "medium"}
+CPU_MSG = ("Runs deliberately slow computation ({kind} `{what}`) on the async path. Key derivation and password "
+           "hashing take tens to hundreds of milliseconds by design, and the whole time they hold {stall}; under "
+           "load every request queues behind them. Run it in a thread or process pool (to_thread / run_in_executor).")
 FAMILY = {"typescript": "javascript", "cpp": "c", "java": "jvm"}
 SPEC_BY_NAME = {s.name: s for s in SPECS}
 SCOPE_SELF = {"Self", "self", "static", "parent", "this"}
@@ -97,10 +101,15 @@ class RepoMap:
 
     # building -------------------------------------------------------------
     def load(self) -> "RepoMap":
+        paths = []
         for path in iter_source_files(self.root, self.include_tests):
             if path.stat().st_size > MAX_FILE_BYTES:
                 self.skipped_large.append(path.relative_to(self.root).as_posix())
                 continue
+            paths.append(path)
+        # Timeouts and retry counts often live in a settings module: learn the numeric constants first.
+        set_constants(collect_constants([p.read_text(encoding="utf8", errors="replace") for p in paths]))
+        for path in paths:
             try:
                 ex = FileExtractor(spec_for(path), path, self.root, self.include_tests).run()
             except Exception as e:  # one odd file must not sink the run
@@ -128,7 +137,10 @@ class RepoMap:
         self.free_by_name = defaultdict(list)
         self.methods_by_name = defaultdict(list)
         self.methods_by_type = defaultdict(list)
+        self.repo_types = set()
         for fn in self.functions.values():
+            if fn.container is not None:
+                self.repo_types.add((family(fn.lang), fn.container))
             fam = family(fn.lang)
             if fn.container is None:
                 self.free_by_name[(fam, fn.name)].append(fn)
@@ -180,12 +192,34 @@ class RepoMap:
             own = fits(self.methods_by_type.get((fam, fn.container, call.name), []))
             if own:
                 return own, "exact"
+        typed = self._typed_receiver(fn, call)
+        if typed is not None:
+            return typed
         if call.name in self.spec(fn).common_methods:
             return [], "name"
         cands = fits(self.methods_by_name.get((fam, call.name), []))
         if len(cands) == 1:
             return cands, "unique"
         return (cands if len(cands) <= MAX_NAME_CANDIDATES else []), "name"
+
+    def _typed_receiver(self, fn: Function, call: Call) -> tuple[list[Function], str] | None:
+        """`x.m()` where this file binds `x` to a class: that class's method, or nothing when the class is not
+        defined in the repo (a library object, e.g. `self._client = httpx.AsyncClient()`), so a same-named
+        repo method is not matched by name."""
+        recv = call.receiver
+        if not recv or call.self_call:
+            return None
+        key = recv.split(".")[-1]
+        if recv.split(".")[0] not in self.spec(fn).self_names and "." in recv:
+            return None  # a.b.c(): only plain names and self attributes are typed here
+        cls = self.files[fn.file].instances.get(key)
+        if not cls:
+            return None
+        fam = family(fn.lang)
+        if (fam, cls) not in self.repo_types:
+            return [], "name"
+        own = [f for f in self.methods_by_type.get((fam, cls, call.name), []) if arity_ok(f, call)]
+        return (own, "exact") if own else None
 
     def _resolve(self):
         self.unresolved: list[tuple[Function, Call]] = []
@@ -288,9 +322,12 @@ class RepoMap:
             where = f"{'blocking ' if b.blocking else ''}{b.kind} `{c.snippet}`"
             if b.blocking and c.context == "async" and spec.has_async:
                 sev = BLOCK_SEVERITY.get(b.category, "high")
+                cpu = b.category == CPU
                 F.append(self._finding(
-                    "blocking-in-async", "low" if fn.is_startup else sev, b.confidence, fn, c.line,
-                    f"Blocking call on an async path ({where}). A slow response stalls {spec.stall_phrase}."
+                    "cpu-heavy-in-async" if cpu else "blocking-in-async", "low" if fn.is_startup else sev,
+                    b.confidence, fn, c.line,
+                    (CPU_MSG.format(kind=b.kind, what=c.snippet, stall=spec.stall_phrase) if cpu else
+                     f"Blocking call on an async path ({where}). A slow response stalls {spec.stall_phrase}.")
                     + (STARTUP_NOTE if fn.is_startup else ""),
                     reached_from=self._roots(fn.id),
                 ))
@@ -309,7 +346,9 @@ class RepoMap:
                     f"External call without an explicit timeout ({where}). {note}",
                 ))
             if c.loop_depth and b.category in (NET, DB):
-                F.append(self._loop_finding(fn, c, f"{b.kind} I/O inside a loop ({where})", b.confidence))
+                lf = self._loop_finding(fn, c, f"{b.kind} I/O inside a loop ({where})", b.confidence)
+                if lf is not None:
+                    F.append(lf)
 
         reported = set()
         for e in sorted(self.edges, key=lambda e: CONF_RANK[e.confidence]):
@@ -324,10 +363,15 @@ class RepoMap:
                     sev = DOWNGRADE[sev]
                 if caller.is_startup:
                     sev = "low"
+                cpu = terminal.category == CPU
                 F.append(self._finding(
-                    "blocking-in-async", sev, weakest, caller, e.line,
-                    f"Async code calls sync `{callee.qualname}`, which blocks ({terminal.kind}). A slow "
-                    f"response stalls {self.spec(caller).stall_phrase}."
+                    "cpu-heavy-in-async" if cpu else "blocking-in-async", sev, weakest, caller, e.line,
+                    (f"Async code calls sync `{callee.qualname}`, which runs deliberately slow computation "
+                     f"({terminal.kind} `{terminal.call.snippet}`). Key derivation and password hashing take tens "
+                     f"to hundreds of milliseconds by design and hold {self.spec(caller).stall_phrase} the whole "
+                     "time. Run it in a thread or process pool." if cpu else
+                     f"Async code calls sync `{callee.qualname}`, which blocks ({terminal.kind}). A slow "
+                     f"response stalls {self.spec(caller).stall_phrase}.")
                     + (" Part of the chain is name-matched; confirm it." if weakest == "name" else "")
                     + (STARTUP_NOTE if caller.is_startup else ""),
                     chain=[caller.qualname, *names],
@@ -335,10 +379,12 @@ class RepoMap:
                 ))
             if e.loop_depth and e.callee in io_reach and e.callee != e.caller:
                 call = next(c for c in caller.calls if c.line == e.line)
-                F.append(self._loop_finding(
+                lf = self._loop_finding(
                     caller, call, f"call to `{callee.qualname}` inside a loop performs I/O", e.confidence,
                     chain=[caller.qualname, *self._io_chain(e.callee)],
-                ))
+                )
+                if lf is not None:
+                    F.append(lf)
 
         for fid, hit in self.hook_hits:
             if not hit.rule.startswith("_"):  # "_"-rules are facts for repo-wide passes, not findings
@@ -346,18 +392,22 @@ class RepoMap:
         F.extend(self._lock_order())
 
         for fn in fns.values():
-            if fn.max_loop_depth >= 2:
+            depth = fn.scaling_depth
+            if depth >= 2:
+                # On a request path, quadratic work over request- or table-sized data is a latency bug.
+                on_path = fn.is_entry or any(fns[r].is_entry for r in self._root_ids(fn.id))
                 F.append(self._finding(
-                    "nested-loops", "info", "exact", fn, fn.line,
-                    f"Loops nested {fn.max_loop_depth} deep: roughly O(n^{fn.max_loop_depth}). "
+                    "nested-loops", "low" if on_path else "info", "exact", fn, fn.line,
+                    f"Loops over input-sized collections nested {depth} deep: roughly O(n^{depth})"
+                    + (", on a request path" if on_path else "") + ". "
                     "Candidate for complexity fitting with large inputs (M2).",
                 ))
 
         for fn in fns.values():
-            if fn.is_async and fn.max_loop_depth >= 2 and not any(c.awaited and c.loop_depth for c in fn.calls):
+            if fn.is_async and fn.scaling_depth >= 2 and not any(c.awaited and c.loop_depth for c in fn.calls):
                 F.append(self._finding(
                     "cpu-heavy-in-async", "low", "heuristic", fn, fn.line,
-                    f"Async function with loops nested {fn.max_loop_depth} deep and no await inside them. CPU-bound "
+                    f"Async function with loops nested {fn.scaling_depth} deep and no await inside them. CPU-bound "
                     "work like this holds the event loop or runtime thread until it finishes. Offload it to a worker "
                     "pool or thread, or yield periodically. Runtime tracing shows how long it really runs.",
                 ))
@@ -380,6 +430,17 @@ class RepoMap:
 
         for scc in sccs:
             first = fns[scc[0]]
+            if len(scc) == 1 and first.depth_guard:
+                continue  # carries and checks its own depth limit
+            if any(i in io_reach for i in scc):
+                F.append(self._finding(
+                    "recursion", "low", "name", first, first.line,
+                    "Recursion that fetches as it goes: its depth is set by the data (a parent chain, a graph), so "
+                    "a cycle or a very deep chain means unbounded recursion and one query per level. Track visited "
+                    "nodes and cap the depth, or fetch the chain in one query.",
+                    chain=[fns[i].qualname for i in scc],
+                ))
+                continue
             F.append(self._finding(
                 "recursion", "info", "name", first, first.line,
                 "Recursive cycle; check that depth is bounded on extreme inputs.",
@@ -443,8 +504,16 @@ class RepoMap:
         return Finding(rule, sev, conf, fn.lang, fn.qualname, fn.file, line, msg,
                        chain or [], reached_from or [])
 
-    def _loop_finding(self, fn, call, what, conf, chain=None) -> Finding:
+    @staticmethod
+    def _retry_only(fn: Function, call: Call) -> bool:
+        """Every loop around this call retries it: the retry rules own it, it is not N+1."""
+        around = [lp for lp in fn.loops if lp.line <= call.line <= lp.end_line]
+        return bool(around) and all(lp.retry_like for lp in around)
+
+    def _loop_finding(self, fn, call, what, conf, chain=None) -> Finding | None:
         # A bare infinite loop is usually the service's main tick loop: note it, don't alarm.
+        if self._retry_only(fn, call):
+            return None
         per_item = any(k != "forever" for k in call.loop_kinds)
         return self._finding(
             "io-in-loop", "medium" if per_item else "low", conf, fn, call.line,
@@ -481,6 +550,19 @@ class RepoMap:
                 break
             fid = nxt
         return out
+
+    def _root_ids(self, fid: str) -> list[str]:
+        seen, roots, q = {fid}, [], deque([fid])
+        while q:
+            cur = q.popleft()
+            callers = [e.caller for e in self.in_edges[cur]]
+            if not callers and cur != fid:
+                roots.append(cur)
+            for c in callers:
+                if c not in seen:
+                    seen.add(c)
+                    q.append(c)
+        return roots
 
     def _roots(self, fid: str, limit: int = 5) -> list[str]:
         """Topmost callers (entry points first) that can reach `fid`."""
