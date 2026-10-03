@@ -44,7 +44,14 @@ minutes.
 This step works in any language. If the user gave a workload after `--`, or the
 repo has an obvious test suite and the user agrees, run
 `trace "<repo>" [--otlp] [--heartbeat REGEX] -- <command>`:
-- Python 3.12+ is traced automatically.
+- Python 3.12+ is traced automatically. Add `--inject-latency 150`: the tracer
+  sleeps 150 ms on entry to every function the map says does blocking I/O, so
+  a test suite with fast test doubles still shows which of them block the
+  event loop (a stall on the exact stack: the finding is confirmed with no
+  investigation) and which run on a worker thread (no stall: evidence against).
+  Without it, a fast fake upstream hides every blocking call. Use the repo's
+  own interpreter for the command (`.audit/venv/bin/python -m pytest` after
+  `repro-env`).
 - Node (JavaScript, TypeScript) is profiled automatically: stalls with stacks
   and exact call counts.
 - Other languages send OpenTelemetry spans with `--otlp` when instrumented
@@ -75,6 +82,8 @@ Repeat:
      `source`, so the investigator can check it is reading the right tree);
    - one line: "The repo root is the `repo` field; copy it exactly, including
      any spaces."
+   - for Python, the interpreter reproductions run under (`<repo>/.audit/venv/bin/python`
+     after `repro-env`), so the investigator does not go looking for one.
 
    Run at most 4 at a time. Each returns a JSON list with one verdict per
    finding in the item's `findings`. Do not investigate anything that is not
@@ -92,6 +101,10 @@ Repeat:
    counts, and the budget left. Then loop.
 
 Between rounds the queue does the following on its own:
+- It spends nothing on effects the trace already showed: a blocking call that
+  stalled the loop on its predicted stack, a counted N+1 fan-out, a measured
+  CPU slice. Those appear as **observed** in the report. The budget goes to
+  what only a reproduction can show: deadlocks, hangs, retry storms, races.
 - It adds follow-ups (`propagated:<rule>`) at the callers of confirmed
   findings, preferring entry points and callers behind a deadline. This is how
   a proven effect gets traced up toward the entry points.

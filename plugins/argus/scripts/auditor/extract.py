@@ -14,7 +14,7 @@ from tree_sitter_language_pack import get_parser
 
 from .langs.base import LangSpec, split_top, text, walk
 from .model import Call, FileCtx, Function, HookHit, LoopInfo
-from .timeouts import parse_duration, sleep_duration
+from .timeouts import constant, parse_duration, sleep_duration
 
 BLOCKISH = frozenset({
     "block", "statement_block", "compound_statement", "statements", "body_statement",
@@ -216,6 +216,52 @@ def _matching_paren(s: str, i: int) -> int:
     return len(s) - 1
 
 
+_PY_BIND = re.compile(r"^[ \t]*(?:self\.)?(\w+)\s*(?::\s*[\w.\[\]| ]+)?=\s*(?:await\s+)?((?:\w+\.)*[A-Z]\w*)\s*\(", re.M)
+_PY_PARAM = re.compile(r"\b(\w+)\s*:\s*(?:\w+\.)*([A-Z]\w*)\b(?!\s*\[)")
+_PY_SELF_ALIAS = re.compile(r"^[ \t]*self\.(\w+)\s*(?::[^=\n]+)?=\s*(\w+)\s*$", re.M)
+
+
+def _py_instances(src: str) -> dict[str, str | None]:
+    """Receiver names bound to a known class in this file (see FileCtx.instances)."""
+    out: dict[str, str | None] = {}
+
+    def bind(name: str, cls: str) -> None:
+        out[name] = cls if out.get(name, cls) == cls else None
+    for m in _PY_BIND.finditer(src):
+        bind(m.group(1), m.group(2).rsplit(".", 1)[-1])
+    params: dict[str, str] = {}
+    for m in _PY_PARAM.finditer(src):
+        params.setdefault(m.group(1), m.group(2))
+    for m in _PY_SELF_ALIAS.finditer(src):
+        if m.group(2) in params:
+            bind(m.group(1), params[m.group(2)])
+    return out
+
+
+_DEPTH_PARAM = re.compile(r"(?i)\b(\w*depth|level|remaining|hops|ttl)\b")
+_DEPTH_CHECK = re.compile(r"(?i)\b(\w*depth|level|remaining|hops|ttl)\b\s*(>=|>|<=|<|==)|(>=|>|<=|<|==)\s*\w*depth\b")
+_HANDLER_TYPES = frozenset({"except_clause", "catch_clause", "rescue", "catch_block"})
+# A loop over a literal or an UPPER_CASE constant (`for day in DAYS`, `for x in (1, 2, 3)`): fixed size.
+_FIXED_ITERABLE = re.compile(r"\b(in|of)\s+(?:\w+\.)*[A-Z][A-Z0-9_]*[A-Z0-9]\s*\)?$"
+                             r"|\b(in|of)\s+(\[[^\[\]]*\]|\((?:[^()]|\([^()]*\))*,(?:[^()]|\([^()]*\))*\))\s*\)?$")
+_REF_TYPES = ("identifier", "attribute", "scoped_identifier", "field_expression", "member_expression",
+              "selector_expression", "field_access", "method_reference")
+_ITERABLE_FIELDS = ("right", "value", "iterable")
+
+
+def _in_iterable(loop: Node, node: Node) -> bool:
+    """True when `node` sits in the loop's iterable (`for x in f():`, `[g(r) for r in f()]`): evaluated once,
+    not once per item."""
+    parts = [loop] + [c for c in loop.named_children if c.type == "for_in_clause"][:1]
+    for p in parts:
+        for f in _ITERABLE_FIELDS:
+            it = p.child_by_field_name(f)
+            if it is not None and p.child_by_field_name("body") is not it and \
+                    it.start_byte <= node.start_byte and node.end_byte <= it.end_byte:
+                return True
+    return False
+
+
 _FOREVER = re.compile(r"\s*(while\s*\(?\s*(true|True|1)\s*\)?\s*:?|for\s*(\(\s*;\s*;\s*\))?|loop|repeat)\s*")
 
 
@@ -262,7 +308,10 @@ def _const(name: str, src: str) -> int | None:
         return int(name)
     last = name.split(".")[-1]
     m = re.search(rf"\b{re.escape(last)}\b\s*(?::\s*[\w<>\[\]]+\s*)?=\s*(\d+)\b", src)
-    return int(m.group(1)) if m else None
+    if m:
+        return int(m.group(1))
+    v = constant(name)  # defined in another module: range(settings.MAX_ATTEMPTS)
+    return int(v) if v is not None and v == int(v) else None
 
 
 def _count(header: str, src: str) -> tuple[str, int | None]:
@@ -388,6 +437,8 @@ class FileExtractor:
             self.fctx.client_timeout_s = parse_duration(self.src_text[m.start():m.end() + 160], spec.name)
         else:
             self.fctx.untimed_client = bool(_UNTIMED_CLIENT.search(self.src_text))
+        if spec.name == "python":
+            self.fctx.instances = _py_instances(self.src_text)
         self.functions: list[Function] = []
         self.hook_hits: list[tuple[str, HookHit]] = []
 
@@ -463,6 +514,7 @@ class FileExtractor:
         else:
             fn.arity, fn.takes_self = _arity(spec, node, cont is not None)
         fn.retry = _retry_decorator(prefix + "\n" + header)
+        fn.depth_guard = bool(_DEPTH_PARAM.search(header) and body is not None and _DEPTH_CHECK.search(text(body)))
         scan = body if body is not None else node
         nesting = 0
         stack = [(scan, 0)]
@@ -477,6 +529,10 @@ class FileExtractor:
                 line = (name_node or n).start_point[0] + 1
                 fn.calls.append(self._call(raw, scoped, line, n, _awaited(spec, n), fn, scan, self_names,
                                            _argc(n)))
+                ref = self._offloaded_ref(n, raw)
+                if ref is not None:  # to_thread(f, ...): f runs on a worker thread; keep the edge
+                    fn.calls.append(self._call(text(ref), False, ref.start_point[0] + 1, ref, False, fn, scan,
+                                               self_names, None))
             elif n.type in spec.macro_types:
                 fn.calls += self._macro_calls(n, fn, scan, self_names)
             for c in n.named_children:
@@ -487,6 +543,24 @@ class FileExtractor:
         for hook in spec.hooks:
             self.hook_hits += [(fn.id, h) for h in hook(spec, node, scan, is_async)]
         self.functions.append(fn)
+
+    def _offloaded_ref(self, call: Node, raw: str) -> Node | None:
+        """The function passed by reference to an offload call (`to_thread(f, x)`, `run_in_executor(None, f)`,
+        `spawn_blocking(f)`), so the call graph still reaches it. Lambdas and closures are already functions."""
+        spec = self.spec
+        if spec.offload is None:
+            return None
+        path = canon(normalize(raw), self.fctx.imports)
+        if not spec.offload.search(f"{path} {text(call)[:200]}"):
+            return None
+        args = call.child_by_field_name("arguments")
+        if args is None or args.type not in ARG_CONTAINERS:
+            return None
+        pos = [c for c in args.named_children if c.type not in ("keyword_argument", "comment")]
+        i = 1 if path.rsplit(".", 1)[-1] == "run_in_executor" else 0
+        if len(pos) <= i or pos[i].type not in _REF_TYPES:
+            return None
+        return pos[i]
 
     def _loop_info(self, n: Node) -> LoopInfo:
         body = n.child_by_field_name("body")
@@ -510,10 +584,18 @@ class FileExtractor:
                 else:
                     kind = "collection"
         sleep_s = None
+        hot_error_path = False
         if body is not None:
             for c in walk(body, self._is_function):
                 if c.type in self.spec.call_types and _SLEEPY.search(normalize(callee(c)[0])):
                     sleep_s = max(sleep_s or 0.0, sleep_duration(text(c), self.spec.name) or 0.0)
+                elif c.type in _HANDLER_TYPES and re.search(r"\bcontinue\b", text(c)) and not any(
+                        k.type in self.spec.call_types and _SLEEPY.search(normalize(callee(k)[0]))
+                        for k in walk(c, self._is_function)):
+                    hot_error_path = True  # `except: continue` skips the loop's delay on failure
+        head = header.strip().rstrip(":{").strip()
+        fixed = (kind == "counted" and bound is not None) or (
+            kind == "collection" and bool(_FIXED_ITERABLE.search(head)))
         return LoopInfo(
             line=n.start_point[0] + 1, end_line=n.end_point[0] + 1, kind=kind, bound=bound,
             handles_errors=bool(_HANDLES.search(body_text)), sleep_s=sleep_s,
@@ -521,6 +603,7 @@ class FileExtractor:
             exits=bool(re.search(r"\b(break|return)\b", body_text)),
             retryish=bool(re.search(r"(?i)(attempt|retr(y|ies)|tries|backoff)", header + body_text)),
             policy_bound=bool(_POLICY_BOUND.search(body_text)),
+            hot_error_path=hot_error_path, fixed=fixed, span=(n.start_byte, n.end_byte),
         )
 
     # calls ---------------------------------------------------------------
@@ -574,7 +657,8 @@ class FileExtractor:
         while n is not None:
             t = n.type
             if t in spec.loop_types:
-                loop_kinds.append(_loop_kind(n))
+                if not _in_iterable(n, call):
+                    loop_kinds.append(_loop_kind(n))
             elif t == "with_statement":  # Python: async with asyncio.timeout(3):
                 head = _header(n, n.child_by_field_name("body"))
                 if _TIMEOUT_WITH.search(head):

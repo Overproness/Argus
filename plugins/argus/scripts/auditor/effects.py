@@ -105,9 +105,7 @@ class Effects:
             return self._retry_loops[fn.id]
         out = []
         for lp in fn.loops:
-            if lp.kind == "collection" or not lp.handles_errors:
-                continue
-            if not (lp.retryish or (lp.exits and (lp.sleep_s is not None or lp.kind == "counted"))):
+            if not lp.retry_like:
                 continue
             if not self._io_in(fn, lp.line, lp.end_line):
                 continue
@@ -130,7 +128,7 @@ class Effects:
                 mult *= n
                 factor = "∞" if att is None else (str(att) if att else "?")
                 layers.append((f"{fn.qualname} retry loop ×{factor} ({fn.file}:{lp.line})", factor))
-                if lp.sleep_s and n != INF:
+                if lp.sleep_s and n != INF and not lp.hot_error_path:
                     delay += (n - 1) * lp.sleep_s
         return mult, layers, delay
 
@@ -310,7 +308,8 @@ class Effects:
         for fn in self.fns.values():
             layers_here = []
             for lp, att in self.retry_loops(fn):
-                layers_here.append(("loop", lp.line, att, "none" if lp.sleep_s is None else
+                # A delay only on the success path (`except: continue` jumps past it) is no backoff at all.
+                layers_here.append(("loop", lp.line, att, "none" if lp.sleep_s is None or lp.hot_error_path else
                                     ("exponential" if lp.exponential else "fixed")))
             if fn.retry and fn.lang in ("python", "java"):
                 if self._io_in(fn, fn.line, fn.end_line):

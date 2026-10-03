@@ -150,16 +150,20 @@ class LoopMonitor:
     max_lag: float = 0.0
     lags: list[float] = field(default_factory=list)
     _task: asyncio.Task | None = None
+    _tick_start: float | None = None  # loop time the pending heartbeat went to sleep
+
+    def _note(self, lag: float) -> None:
+        self.lags.append(lag)
+        if lag > self.max_lag:
+            self.max_lag = lag
 
     async def _run(self):
         loop = asyncio.get_running_loop()
         while True:
-            t0 = loop.time()
+            self._tick_start = t0 = loop.time()
             await asyncio.sleep(self.period)
-            lag = loop.time() - t0 - self.period
-            self.lags.append(lag)
-            if lag > self.max_lag:
-                self.max_lag = lag
+            self._tick_start = None
+            self._note(loop.time() - t0 - self.period)
 
     async def __aenter__(self):
         self._task = asyncio.ensure_future(self._run())
@@ -167,6 +171,12 @@ class LoopMonitor:
         return self
 
     async def __aexit__(self, *exc):
+        # A blocking call that ends right before the block exits leaves the heartbeat overdue but not yet run;
+        # cancelling it would drop exactly the stall being measured. Count the overdue time first.
+        if self._tick_start is not None:
+            overdue = asyncio.get_running_loop().time() - self._tick_start - self.period
+            if overdue > 0:
+                self._note(overdue)
         self._task.cancel()
         try:
             await self._task

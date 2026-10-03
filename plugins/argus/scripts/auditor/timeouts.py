@@ -58,6 +58,51 @@ _MS_LANGS = {"javascript", "typescript"}
 
 _POSITIONAL = re.compile(r"\b(wait_for|timeout_at|timeout)\(")
 
+# Repo-wide numeric constants (`CHECKOUT_DEADLINE = 3.0`, `const MAX_RETRIES: u32 = 5;`), filled once per map
+# run by `collect_constants` so a timeout or retry count held in a settings module still has a value.
+# UPPER_CASE names only: that is the convention for constants in every supported language, and it keeps
+# ordinary variables (whose value changes at run time) out.
+_CONST_DEF = re.compile(
+    r"^\s*(?:(?:pub(?:\([^)]*\))?\s+)?(?:export\s+)?(?:const|static|final|val|let|var)\s+)*"
+    r"(?:(?:public|private|protected|static|final|readonly)\s+)*(?:[\w<>\[\]]+\s+)?"
+    rf"([A-Z][A-Z0-9_]*[A-Z0-9])\s*(?::\s*[\w<>\[\]&]+)?\s*=\s*(\d[\d_]*(?:\.\d+)?|\.\d+)\s*(?:;|\s*(?:#|//|$))",
+    re.M)
+_CONST_REF = re.compile(r"\b(?:[A-Za-z_]\w*(?:\.|::))*([A-Z][A-Z0-9_]*[A-Z0-9])\b")
+_constants: dict[str, float] = {}
+
+
+def collect_constants(sources: list[str]) -> dict[str, float]:
+    """Every UPPER_CASE name bound to a number at statement level; a name bound to two values is dropped."""
+    seen: dict[str, float | None] = {}
+    for src in sources:
+        for m in _CONST_DEF.finditer(src):
+            v = float(m.group(2).replace("_", ""))
+            name = m.group(1)
+            seen[name] = v if seen.get(name, v) == v else None
+    return {k: v for k, v in seen.items() if v is not None}
+
+
+def set_constants(values: dict[str, float]) -> None:
+    _constants.clear()
+    _constants.update(values)
+
+
+def constant(name: str) -> float | None:
+    """Value of `NAME`, `settings.NAME` or `config::NAME` from the repo's constants, if known."""
+    m = _CONST_REF.fullmatch(name.strip())
+    return _constants.get(m.group(1)) if m else None
+
+
+def resolve_constants(text: str) -> str:
+    """Replace references to known numeric constants with their values, so the duration patterns see numbers."""
+    if not _constants or not text:
+        return text
+
+    def sub(m: re.Match) -> str:
+        v = _constants.get(m.group(1))
+        return m.group(0) if v is None else f"{v:g}"
+    return _CONST_REF.sub(sub, text)
+
 
 def _args(text: str, open_idx: int) -> list[str]:
     """Top-level arguments of the call whose '(' is at open_idx."""
@@ -84,6 +129,7 @@ def parse_duration(text: str, lang: str = "") -> float | None:
     """The first duration in `text`, in seconds."""
     if not text:
         return None
+    text = resolve_constants(text)
     best: tuple[int, float] | None = None
     # asyncio.wait_for(<anything>, 10): the deadline is a bare positional number.
     for m in _POSITIONAL.finditer(text):
@@ -123,6 +169,7 @@ def sleep_duration(text: str, lang: str = "") -> float | None:
     d = parse_duration(text, lang)
     if d is not None:
         return d
+    text = resolve_constants(text)
     m = re.search(rf"(?:\bsleep|\bSleep|\busleep|\bdelay)\s*\(\s*{NUM}", text)
     if not m:
         return None
