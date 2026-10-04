@@ -194,3 +194,89 @@ def test_confirmed_checks_its_own_repro_file(audit):
     orchestrate.record(audit, [{"finding": fid, "verdict": "confirmed", "repro_file": ".audit/repros/test_mine.py"}])
     v = json.loads((audit / "verdicts.json").read_text())["verdicts"][fid]
     assert v["verdict"] == "inconclusive" and v["repro_check"] == "failed" and v["blocked_by"] == "repro-check"
+
+
+def test_injected_latency_evidence_is_labeled_conditional_and_downgraded():
+    # Observed only because the trace injected latency: downgraded severity, labeled "blocks if slow".
+    injected = {**{"id": "blocking-in-async@m.f:1", "severity": "high", "rule": "blocking-in-async",
+                   "function": "m.f", "file": "m.py", "line": 1, "message": "x", "chain": []},
+                "evidence": {"status": "confirmed", "injected": True, "detail": "stall under injected latency"},
+                "verdict": None, "status": "observed"}
+    entry = orchestrate._apply_conditional(dict(injected))
+    assert entry["severity"] == "medium" and entry["conditional"] is True
+
+    # Organically observed under real traffic (no injection): untouched.
+    organic = {**injected, "evidence": {"status": "confirmed", "injected": False, "detail": "stall seen live"}}
+    entry2 = orchestrate._apply_conditional(dict(organic))
+    assert entry2["severity"] == "high" and "conditional" not in entry2
+
+    # An investigator's own passing reproduction outranks the trace's injected hint: not conditional.
+    proven = {**injected, "verdict": {"verdict": "confirmed"}, "status": "proven"}
+    entry3 = orchestrate._apply_conditional(dict(proven))
+    assert entry3["severity"] == "high" and "conditional" not in entry3
+
+
+def test_report_markdown_labels_conditional_findings():
+    data = {
+        "meta": {"generated_at": "now", "root": "/x", "languages": {}, "trace": True, "repro": False,
+                 "investigated": 0, "rounds": 0, "stop": None},
+        "summary": {"by_status": {"observed": 1}},
+        "findings": [{
+            "id": "blocking-in-async@m.f:1", "severity": "medium", "rule": "blocking-in-async",
+            "function": "m.f", "file": "m.py", "line": 1, "message": "x", "chain": [], "status": "observed",
+            "conditional": True,
+            "evidence": {"status": "confirmed", "injected": True, "detail": "stall under injected latency"},
+            "verdict": None, "not_investigated": None,
+        }],
+    }
+    md = report_html.to_markdown(data)
+    assert "blocks if slow" in md and "latency was injected" in md
+
+
+def test_wrong_pattern_deprioritizes_but_never_suppresses_other_instances(audit):
+    # Two retry-without-backoff findings with different leaves: same_effect merging (same rule *and* leaf)
+    # does not apply, so only the wrong_pattern mechanism is in play here.
+    q1 = orchestrate.queue(audit, {"total": 10, "per_round": 1}, rules={"retry-without-backoff"})
+    fid1 = q1["items"][0]["id"]
+    orchestrate.record(audit, [{"finding": fid1, "verdict": "rejected", "wrong_pattern": True,
+                                "reason": "this retry loop is bounded by a caller-side deadline, not infinite"}])
+    q2 = orchestrate.queue(audit, {"per_round": 10}, rules={"retry-without-backoff"})
+    ids = [it["id"] for it in q2["items"]]
+    assert ids  # the other retry-without-backoff finding is still queued, not suppressed
+    assert fid1 not in ids  # the rejected one itself does not come back
+    for it in q2["items"]:
+        assert it.get("note", "").startswith("rejected elsewhere")
+
+
+def test_unflagged_hotspots_spend_leftover_budget(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text(
+        "from fastapi import FastAPI\n"
+        "app = FastAPI()\n\n"
+        "@app.post('/clean')\n"
+        "async def clean_entry(x: int) -> dict:\n"
+        "    return {'ok': x * 2}\n\n"
+        "@app.get('/slow')\n"
+        "async def slow():\n"
+        "    import time\n"
+        "    time.sleep(1)\n"
+        "    return {'ok': True}\n")
+    out = repo / ".audit"
+    report.write(RepoMap(repo).load(), out)
+
+    q1 = orchestrate.queue(out, {"total": 5, "per_round": 5})
+    assert not q1["hotspot_pass"]  # a real finding exists (app.slow); no filler needed yet
+    repro_json(out, *[it["id"] for it in q1["items"]])
+    orchestrate.record(out, [{"finding": it["id"], "verdict": "confirmed", "repro_file": "test_x.py"}
+                             for it in q1["items"]])
+
+    q2 = orchestrate.queue(out, {"per_round": 5})
+    assert q2["stop"] is None and q2["hotspot_pass"]
+    [h] = q2["items"]
+    assert h["kind"] == "hotspot" and h["function"] == "app.clean_entry" and "harness" in h
+
+    # Recorded like any other item, and does not come back a third time.
+    orchestrate.record(out, [{"finding": h["id"], "verdict": "rejected", "reason": "read it, nothing there"}])
+    q3 = orchestrate.queue(out, {"per_round": 5}, dry_run=True)
+    assert h["id"] not in {it["id"] for it in q3["items"]}

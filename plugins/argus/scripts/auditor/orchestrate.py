@@ -127,6 +127,19 @@ def _suppressed_by(item: dict, wrong_edges: list[tuple[str, str, str]]) -> str |
     return None
 
 
+# A rejected `wrong_edge` means one specific call resolves elsewhere: that edge cannot exist twice, so every
+# finding through it is safely suppressed. A rejected `wrong_pattern` means the *rule itself* misfired on
+# this kind of code (an investigator's judgment call, not a structural fact) — it does not prove the rule is
+# wrong everywhere else, so other instances are only deprioritized and flagged for a human to glance at, never
+# silently dropped.
+WRONG_PATTERN_PENALTY = 0.5
+
+
+def _pattern_note(item: dict, wrong_patterns: dict[str, list[str]]) -> str | None:
+    fids = wrong_patterns.get(item["rule"])
+    return f"rejected elsewhere as a bad match for this rule: {', '.join(fids[:3])}" if fids else None
+
+
 def _score(item: dict, st: State) -> float:
     ev = (item.get("trace_evidence") or {}).get("status")
     s = (SEV_W.get(item["severity"], 1.0) * CONF_W.get(item.get("confidence", "heuristic"), 0.8)
@@ -163,8 +176,8 @@ def _derive(st: State, fid: str, v: dict) -> list[dict]:
 
 
 def _brief(it: dict) -> dict:
-    d = {k: it.get(k) for k in ("id", "rule", "severity", "line", "message", "chain", "trace_evidence", "given")
-         if it.get(k) not in (None, [], {})}
+    d = {k: it.get(k) for k in ("id", "rule", "severity", "line", "message", "chain", "trace_evidence", "given",
+                                "note") if it.get(k) not in (None, [], {})}
     if it.get("covers"):
         d["same_effect"] = it["covers"]  # other findings with this rule and leaf: they take this verdict
     return d
@@ -181,6 +194,32 @@ def _locate(st: State, it: dict, root: Path) -> dict:
     lo, hi = (fn["lines"] if fn else (None, None))
     return {"abs_file": str(path), "file_sha1": paths.file_digest(path),
             "source": paths.excerpt(path, int(it["line"] or lo or 1), lo, hi)}
+
+
+def _hotspot_candidates(st: State, issued: set[str], already_derived: dict) -> list[dict]:
+    """Entry points the static rules found nothing in at all: not "clean", just unmodeled. A race, an
+    unbounded wait, or a shape no rule covers yet can hide here with zero leads pointing at it. Spent only
+    as filler, when the real queue is empty and budget is left over."""
+    flagged = ({f["function"] for f in st.map["findings"]}
+              | {d["function"] for d in st.ledger.get("derived", {}).values()})
+    out = []
+    for fn in st.map["functions"]:
+        if not fn.get("is_entry") or fn["qualname"] in flagged:
+            continue
+        fid = f"unflagged-hotspot@{fn['qualname']}:{fn['lines'][0]}"
+        if fid in issued or fid in already_derived:
+            continue
+        out.append({
+            "id": fid, "kind": "hotspot", "rule": "unflagged-hotspot", "severity": "medium",
+            "confidence": "heuristic", "lang": fn["lang"], "function": fn["qualname"], "file": "",
+            "line": fn["lines"][0],
+            "message": (f"`{fn['qualname']}` is an entry point with no static finding at all: not a clean "
+                        "bill of health, just a shape none of the rules model (unbounded waits on a future/"
+                        "thread, races on shared state, a loop with no exit condition, ...). Read it fresh, "
+                        "as if auditing it by hand, before assuming it is fine."),
+            "chain": [], "reached_from": [], "score": 0.3 * st.hotspot.get(fn["qualname"], 1.0),
+        })
+    return out
 
 
 def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = None,
@@ -200,6 +239,10 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
     wrong_edges = [(v["wrong_edge"][0], v["wrong_edge"][1], fid) for fid, v in verdicts.items()
                    if v.get("verdict") == "rejected" and isinstance(v.get("wrong_edge"), list)
                    and len(v["wrong_edge"]) == 2]
+    wrong_patterns: dict[str, list[str]] = defaultdict(list)
+    for fid, v in verdicts.items():
+        if v.get("verdict") == "rejected" and v.get("wrong_pattern"):
+            wrong_patterns[fid.split("@", 1)[0]].append(fid)
 
     candidates: list[dict] = []
     for f in st.map["findings"]:
@@ -240,6 +283,10 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
               and (ev.get("injected") or c["rule"] not in LATENCY_RULES)):
             reason = "trace: not-observed under the recorded workload"
         c["score"] = _score(c, st)
+        note = _pattern_note(c, wrong_patterns)
+        if note:
+            c["score"] = round(c["score"] * WRONG_PATTERN_PENALTY, 3)
+            c["note"] = note  # surfaced to the investigator and in queue.json; never changes the verdict
         if reason:
             if reason == "low severity":
                 riders.append(c)  # investigated for free when its function is queued anyway
@@ -270,6 +317,18 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
             it["findings"] = [_brief(it)]
             by_fn[f"{it['function']}#{it['id']}"] = it
     ranked = sorted(by_fn.values(), key=lambda x: -x["score"])
+    from_hotspots = False
+    if not ranked and remaining > 0 and round_no <= b["max_rounds"]:
+        # Nothing left to investigate, but budget remains: spend it checking entry points no rule flagged
+        # at all, instead of leaving it on the table.
+        hotspots = _hotspot_candidates(st, issued, led.get("derived", {}))
+        if hotspots:
+            for h in hotspots:
+                h["findings"] = [_brief(h)]
+                h["harness"] = harness_for(h["lang"])
+                led["derived"].setdefault(h["id"], h)
+            ranked = sorted(hotspots, key=lambda x: -x["score"])
+            from_hotspots = True
 
     stop = None
     take = max(0, min(b["per_round"], remaining))
@@ -290,6 +349,9 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
         it["round"] = round_no
         it["repo"] = str(root)
         it.update(_locate(st, it, root))
+        if not dry_run:
+            from .repro import scaffold
+            it["repro_skeleton"] = str(scaffold.write(it, out_dir / "repros"))
     skipped = [s for s in skipped if s["id"] not in riding]
 
     result = {
@@ -298,7 +360,7 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
         "repo": str(root), "path_warnings": paths.warnings(root),
         "pending": pending, "items": selected,
         "deferred": [it["id"] for it in ranked[take:]] if not stop else [it["id"] for it in ranked],
-        "skipped": skipped,
+        "skipped": skipped, "hotspot_pass": from_hotspots and bool(selected),
     }
     if not dry_run:
         if selected:
@@ -396,6 +458,7 @@ def record(out_dir: Path, verdicts: list[dict]) -> dict:
 
 STATUS_ORDER = ["proven", "observed", "unverified", "inconclusive", "not-observed", "rejected"]
 SEV_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
+SEV_DOWNGRADE = {"high": "medium", "medium": "low", "low": "low", "info": "info"}
 
 
 def _status(f: dict, ev: dict | None, v: dict | None) -> str:
@@ -413,6 +476,21 @@ def _status(f: dict, ev: dict | None, v: dict | None) -> str:
     return "unverified"
 
 
+def _conditional(ev: dict | None, v: dict | None) -> bool:
+    """True when "observed" rests only on the trace's own injected latency, not on traffic that was
+    already slow: a fast real dependency would show the same "not-observed" trace either way, so this is
+    "blocks if slow", a hypothesis the trace made easy to set up, not an organic failure under load."""
+    return bool(ev and ev.get("status") in ("confirmed", "measured") and ev.get("injected")
+               and not (v and v.get("verdict") == "confirmed"))
+
+
+def _apply_conditional(entry: dict) -> dict:
+    if entry["status"] == "observed" and _conditional(entry.get("evidence"), entry.get("verdict")):
+        entry["severity"] = SEV_DOWNGRADE.get(entry["severity"], entry["severity"])
+        entry["conditional"] = True
+    return entry
+
+
 def final(out_dir: Path) -> dict:
     st = State(out_dir)
     led = st.ledger
@@ -427,13 +505,15 @@ def final(out_dir: Path) -> dict:
     for f in st.map["findings"]:
         fid = finding_id(f)
         ev, v = st.evidence.get(fid), led["verdicts"].get(fid)
-        findings.append({**f, "id": fid, "evidence": ev, "verdict": v, "repro": repro_by.get(fid, []),
-                         "status": _status(f, ev, v), "not_investigated": skipped.get(fid)})
+        findings.append(_apply_conditional({**f, "id": fid, "evidence": ev, "verdict": v,
+                                            "repro": repro_by.get(fid, []), "status": _status(f, ev, v),
+                                            "not_investigated": skipped.get(fid)}))
     for fid, d in led.get("derived", {}).items():
         v = led["verdicts"].get(fid)
         if v:  # derived items only matter once investigated
-            findings.append({**d, "evidence": None, "verdict": v, "repro": repro_by.get(fid, []),
-                             "status": _status(d, None, v), "not_investigated": None})
+            findings.append(_apply_conditional({**d, "evidence": None, "verdict": v,
+                                                 "repro": repro_by.get(fid, []), "status": _status(d, None, v),
+                                                 "not_investigated": None}))
     findings.sort(key=lambda x: (STATUS_ORDER.index(x["status"]), SEV_ORDER.get(x["severity"], 9), x["file"], x["line"]))
 
     counts = defaultdict(int)

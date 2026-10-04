@@ -47,7 +47,10 @@ def to_markdown(d: dict) -> str:
                 out.append(f"  - chain: {' → '.join(f['chain'])}")
             ev = f.get("evidence")
             if ev:
-                out.append(f"  - runtime: **{ev['status']}**: {ev['detail']}")
+                label = "blocks if slow" if f.get("conditional") else ev["status"]
+                note = (" — latency was injected to trigger this; it is what happens *if* the dependency is "
+                        "slow, not evidence it already is" if f.get("conditional") else "")
+                out.append(f"  - runtime: **{label}**{note}: {ev['detail']}")
             v = f.get("verdict")
             if v:
                 line = f"  - verdict: **{v['verdict']}**"
