@@ -41,6 +41,7 @@ class LoopInfo:
     hot_error_path: bool = False  # an error handler `continue`s past the loop's delay: failures retry at once
     fixed: bool = False  # iterates a literal count or a constant collection: its size does not grow with input
     span: tuple[int, int] = (0, 0)  # byte range, to tell nesting apart on a single line (nested comprehensions)
+    wall_bound: bool = False  # checks elapsed/deadline/timeout against a clock: bounded even with no literal count
 
     @property
     def retry_like(self) -> bool:

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from . import db, settings, worker
+from . import db, jobs, settings, worker
 from .cache import TTLCache
 from .clients.inventory import InventoryClient
 from .clients.pricing import PricingClient
@@ -149,3 +149,17 @@ async def login(req: LoginRequest) -> dict:
 @app.get("/admin/orders/export")
 async def export_orders() -> dict:
     return {"orders": db.all_orders()}
+
+
+class BatchRequest(BaseModel):
+    order_ids: list[int]
+
+
+@app.post("/batch")
+async def batch(req: BatchRequest) -> dict:
+    return {"job_ids": await jobs.submit_batch(req.order_ids)}
+
+
+@app.get("/jobs/{job_id}")
+async def job_status(job_id: str) -> dict:
+    return await jobs.get_job(job_id)

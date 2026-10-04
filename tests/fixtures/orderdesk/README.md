@@ -10,6 +10,7 @@ services (pricing, inventory, reviews) and publishes order events.
 - `shop/clients/` — HTTP clients for pricing, inventory and reviews
 - `shop/db.py` — SQLite access
 - `shop/worker.py` — price feed sync and reservation replay
+- `shop/jobs.py` — a background job queue (`/batch`, `/jobs/{id}`); see `tests/eval/corpus.yaml`
 
 ## Run
 

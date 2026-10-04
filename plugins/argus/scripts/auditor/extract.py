@@ -298,6 +298,10 @@ _POLICY_BOUND = re.compile(
     r"should_retry|RetryDecision|retry_policy|next_backoff|max_elapsed|max_retries|max_attempts|\.take\(\d+\)"
 )
 _WHILE_BOUND = re.compile(r"\bwhile\s*\(?\s*!?\s*[\w.]+\s*(<=?)\s*([\w.]+)")
+# A condition or body that checks elapsed time against a deadline: bounded even with no literal count.
+_WALL_BOUND = re.compile(
+    r"(?i)\bdeadline\b|\btimeout\b|\btime_limit\b|\bmax_wait\b|\bexpir|\belapsed\w*\s*[<>]|"
+    r"\b(monotonic|perf_counter|time)\s*\(\s*\)\s*[-+]?\s*[<>]=?")
 _RETRY_DECOR = re.compile(
     r"@(?:[\w.]+\.)?(retry|retrying|on_exception|on_predicate|Retryable|Retry)\b\s*(\((?:[^()]|\([^()]*\))*\))?")
 
@@ -596,6 +600,7 @@ class FileExtractor:
         head = header.strip().rstrip(":{").strip()
         fixed = (kind == "counted" and bound is not None) or (
             kind == "collection" and bool(_FIXED_ITERABLE.search(head)))
+        wall_bound = bool(_WALL_BOUND.search(head)) or bool(_WALL_BOUND.search(body_text[:2000]))
         return LoopInfo(
             line=n.start_point[0] + 1, end_line=n.end_point[0] + 1, kind=kind, bound=bound,
             handles_errors=bool(_HANDLES.search(body_text)), sleep_s=sleep_s,
@@ -603,7 +608,7 @@ class FileExtractor:
             exits=bool(re.search(r"\b(break|return)\b", body_text)),
             retryish=bool(re.search(r"(?i)(attempt|retr(y|ies)|tries|backoff)", header + body_text)),
             policy_bound=bool(_POLICY_BOUND.search(body_text)),
-            hot_error_path=hot_error_path, fixed=fixed, span=(n.start_byte, n.end_byte),
+            hot_error_path=hot_error_path, fixed=fixed, wall_bound=wall_bound, span=(n.start_byte, n.end_byte),
         )
 
     # calls ---------------------------------------------------------------

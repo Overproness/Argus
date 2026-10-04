@@ -1,7 +1,7 @@
 import re
 
 from ..model import HookHit
-from .base import CPU, DB, FS, NET, PROCESS, RUNTIME, SLEEP, LangSpec, R, text, walk
+from .base import CPU, DB, FS, NET, PROCESS, RUNTIME, SLEEP, WAIT, LangSpec, R, text, walk
 from .common import API_NAME, PY_CTOR
 
 HTTP_VERBS = {"get", "post", "put", "patch", "delete", "head", "options", "request", "send", "stream"}
@@ -375,6 +375,158 @@ def uncommitted_write(spec, fn_node, body, is_async):
     return []
 
 
+SHRINK_OPS = frozenset({"pop", "popitem", "remove", "discard", "popleft", "clear"})
+GROW_OPS = frozenset({"append", "extend", "insert", "setdefault", "add", "appendleft", "update"})
+_CACHE_NAMEISH = re.compile(r"(?i)cache|_jobs?$|^jobs?$|registry|sessions?$|seen|index|table|store|pool|map$")
+
+
+def unbounded_module_container(spec, fn_node, body, is_async):
+    """A module-level dict/list/set that is only ever grown (append/add/[k]=v) in the whole file, never
+    popped, removed or cleared anywhere: it grows for the life of the process."""
+    root = _root(fn_node)
+    names = _module_state(root)
+    if not names:
+        return []
+    grows: dict[str, int] = {}
+    shrinks: set[str] = set()
+    for n in walk(root):  # the whole file: growth and eviction can be in different functions
+        if n.type == "call":
+            f = n.child_by_field_name("function")
+            if f is not None and f.type == "attribute":
+                obj, method = text(f.child_by_field_name("object")), text(f.child_by_field_name("attribute"))
+                if obj in names:
+                    if method in SHRINK_OPS:
+                        shrinks.add(obj)
+                    elif method in GROW_OPS and obj not in grows:
+                        grows[obj] = n.start_point[0] + 1
+        elif n.type == "assignment":
+            left = n.child_by_field_name("left")
+            if left is not None and left.type == "subscript":
+                base = _base_name(left)
+                if base in names and base not in grows:
+                    grows[base] = left.start_point[0] + 1
+        elif n.type == "delete_statement":
+            for t in walk(n):
+                if t.type == "subscript":
+                    base = _base_name(t)
+                    if base in names:
+                        shrinks.add(base)
+    fn_lo, fn_hi = fn_node.start_point[0] + 1, fn_node.end_point[0] + 1
+    hits = []
+    for name, line in grows.items():
+        if name in shrinks or not (fn_lo <= line <= fn_hi):
+            continue  # bounded elsewhere, or this function isn't the one that grows it (avoid duplicates)
+        hint = " It is never read back by key either; check it is still needed at all." if not _CACHE_NAMEISH.search(
+            name) else ""
+        hits.append(HookHit(
+            "unbounded-module-container", "medium", line,
+            f"Module-level `{name}` is only ever added to across this file, never popped, removed or cleared. "
+            "Every request or background cycle that adds to it grows the process's memory a little more, "
+            f"for as long as the process runs.{hint} Evict old entries (an LRU/TTL cache, a max size, or a "
+            "cleanup pass) or move it out of module scope.",
+        ))
+    return hits
+
+
+_CLIENT_CTOR = re.compile(r"^(httpx\.(Async)?Client|aiohttp\.ClientSession|requests\.Session)\s*\(")
+_FOREVER_WHILE = re.compile(r"(?i)while\s+(true|1)\s*:")
+
+
+def _with_targets(n) -> list[str]:
+    """Variable names a `with`/`async with` statement binds (`as x`) or enters bare (the ctx-manager expr)."""
+    out = []
+    for c in walk(n, lambda c: c.type in _NESTED):
+        if c.type != "with_item":
+            continue
+        item = c.named_children[0] if c.named_children else None
+        if item is not None and item.type == "as_pattern":
+            value, target = item.named_children[0], item.named_children[-1]
+            if value.type in ("identifier", "attribute"):
+                out.append(text(value))
+            out.append(text(target))  # as_pattern_target, or an identifier in grammars without it
+        elif item is not None and item.type in ("identifier", "attribute"):
+            out.append(text(item))
+    return out
+
+
+def client_per_call(spec, fn_node, body, is_async):
+    """An HTTP client/session constructed inside a function body (not reused across a long-lived loop):
+    every call to this function opens its own connection pool instead of reusing one."""
+    for n in walk(body, _skip_nested):
+        if not (n.type == "call" and _CLIENT_CTOR.match(text(n.child_by_field_name("function")) + "(")):
+            continue
+        ctor = n
+        # The constructed client, by name: `httpx.AsyncClient()` entered directly, or assigned then entered
+        # later (`client = httpx.AsyncClient()` ... `async with client as c:`).
+        names = set()
+        assign = ctor.parent
+        rhs = assign.child_by_field_name("right") if assign is not None and assign.type == "assignment" else None
+        if rhs is not None and rhs.id == ctor.id:
+            left = assign.child_by_field_name("left")
+            if left is not None and left.type == "identifier":
+                names.add(text(left))
+        long_lived = False
+        for w in walk(body, _skip_nested):
+            if w.type != "with_statement":
+                continue
+            targets = _with_targets(w)
+            entered_here = ctor.start_byte >= w.start_byte and ctor.end_byte <= w.end_byte
+            entered_by_name = bool(names & set(targets))
+            if not (entered_here or entered_by_name):
+                continue
+            w_body = w.child_by_field_name("body")
+            if w_body is not None and _FOREVER_WHILE.search(text(w_body)[:400]):
+                long_lived = True  # built once, then reused inside a `while True:` loop: long-lived, fine
+                break
+        if long_lived:
+            continue
+        return [HookHit(
+            "client-per-call", "medium", ctor.start_point[0] + 1,
+            "An HTTP client/session is constructed inside this function. If this function runs per request "
+            "(or per loop iteration), it opens a brand-new connection pool every time instead of reusing one: "
+            "slower (a new TCP/TLS handshake each call), and under load it can exhaust sockets. Build the "
+            "client once (module scope, or app startup) and reuse it.",
+        )]
+    return []
+
+
+COMMENT = re.compile(r"^\s*#")
+_HTTP_RESP_ASSIGN = re.compile(
+    r"^\s*(\w+)\s*=\s*(?:await\s+)?[\w.]*\.(get|post|put|patch|delete|request)\s*\(")
+_STATUS_CHECKED = re.compile(r"raise_for_status\s*\(|\.status_code\s*(==|!=|>=|<=|<|>)|\.ok\b|\.is_success\b")
+_RESP_CONSUMED = re.compile(r"\.(json|text|content)\b")
+
+
+def unchecked_response(spec, fn_node, body, is_async):
+    """An HTTP response is parsed or stored without checking its status first: a 4xx/5xx body is treated
+    as if it were a success. Scanned line by line (not node-typed): a status check can be an `if`, an
+    `assert`, or a bare call, and all of those are different node shapes in the grammar."""
+    pending: dict[str, bool] = {}  # var -> checked
+    base = body.start_point[0] + 1
+    for i, line in enumerate(text(body).split("\n")):
+        if COMMENT.match(line):
+            continue
+        ln = base + i
+        m = _HTTP_RESP_ASSIGN.match(line)
+        if m:
+            pending[m.group(1)] = False
+            continue
+        for var in list(pending):
+            if not re.search(rf"\b{re.escape(var)}\b", line):
+                continue
+            if _STATUS_CHECKED.search(line):
+                pending[var] = True
+            elif re.search(rf"\b{re.escape(var)}\b" + r"\s*" + _RESP_CONSUMED.pattern, line) and not pending[var]:
+                return [HookHit(
+                    "unchecked-response", "medium", ln,
+                    f"`{var}` is read here with no status check (`raise_for_status()` / `.status_code` / "
+                    "`.ok`) between the request and this use. An error response (4xx/5xx, or a non-JSON body) "
+                    "is parsed or cached as if it were a success, and the failure surfaces later, far from "
+                    "its cause. Check the status before using the body.",
+                )]
+    return []
+
+
 def threads_and_fanout(spec, fn_node, body, is_async):
     """A thread started per call and never joined; tasks started per item with no cap."""
     hits = []
@@ -470,10 +622,17 @@ SPEC = LangSpec(
         R("runtime", RUNTIME, path=r"^asyncio\.run$|(^|\.)run_until_complete$", blocking=True),
         R("cpu", CPU, path=r"^hashlib\.(pbkdf2_hmac|scrypt)$|^bcrypt\.(hashpw|checkpw|kdf)$|"
           r"^(argon2|passlib\.hash)\.\w+\.(hash|verify)$|^scrypt\.(hash|encrypt)$", blocking=True),
+        # A concurrent.futures.Future's .result() or a threading.Thread's .join() called without going
+        # through to_thread/run_in_executor: it blocks the calling thread until the future/thread finishes.
+        R("future", WAIT, methods={"result"}, receiver=r"(?i)future|\bfut\b|\btask\b",
+          imp=r"^concurrent\.futures\b", blocking=True),
+        R("thread-join", WAIT, methods={"join"}, receiver=r"(?i)thread|\bt\b|\bth\b|\bworker\b",
+          imp=r"^threading\b", blocking=True),
         R("api", NET, name=API_NAME, awaited=True),
     ],
     imports=imports,
-    hooks=[locks, race_across_await, mutate_while_iterating, threads_and_fanout, uncommitted_write],
+    hooks=[locks, race_across_await, mutate_while_iterating, threads_and_fanout, uncommitted_write,
+           unbounded_module_container, client_per_call, unchecked_response],
     startup=re.compile(r"on_event\(\s*['\"]startup|\.on_startup\b|\blifespan\b"),
     stall_phrase="the asyncio event loop, freezing every coroutine",
     scip_indexer="scip-python",

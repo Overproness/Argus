@@ -35,11 +35,15 @@ cases:
     path: tests/fixtures/orderdesk
     lang: python
     note: >-
-      Synthetic but realistic FastAPI service: 22 seeded defects across Argus's Python rules, written with no
-      hint comments, plus 13 decoys (correct code shaped like a bug). A plain LLM audit prompt found 21/22 of
-      the seeds on this repo, so it is the bar the static map has to clear. Most misses here are resolution
-      gaps: timeouts and retry counts held in settings constants, I/O reached through asyncio.to_thread,
-      methods called on module-level instances, patterns outside function bodies.
+      Synthetic but realistic FastAPI service: seeded defects across Argus's Python rules, written with no
+      hint comments, plus decoys (correct code shaped like a bug). A plain LLM audit prompt found 21/22 of
+      the original seeds on this repo, so it is the bar the static map has to clear. Most misses here are
+      resolution gaps: timeouts and retry counts held in settings constants, I/O reached through
+      asyncio.to_thread, methods called on module-level instances, patterns outside function bodies.
+      `shop/jobs.py` (/batch, /jobs/{id}) was added later: a real audit run against a private job-queue app
+      missed its exact shape (a blocking wait on a ThreadPoolExecutor future, an unbounded status-poll loop,
+      an unbounded module-level dict) because no rule modeled it yet; these three seeds keep that regression
+      caught permanently instead of only in the one run that found it.
     expected:
       - {rule: blocking-in-async, function: "shop.services.orders.OrderService.build_quote", file: shop/services/orders.py}
       - {rule: blocking-in-async, function: "shop.services.orders.OrderService._reserve_and_price", file: shop/services/orders.py}
@@ -68,6 +72,11 @@ cases:
       # outside the classic reliability rules, but patterns Argus has: SQL built by an f-string, a nested-quantifier regex
       - {rule: sql-injection, function: "shop.db.search_products", file: shop/db.py}
       - {rule: redos-regex, function: "shop.money.coupon_discount", file: shop/money.py}
+      # a background job queue (/batch, /jobs/{id}): the newer concurrency rules, added after a real
+      # audit run on a job-queue app missed every one of these because no rule modeled the shape yet.
+      - {rule: blocking-in-async, function: "shop.jobs.submit_batch", file: shop/jobs.py, line: 37}
+      - {rule: unbounded-wait-loop, function: "shop.jobs.get_job", file: shop/jobs.py, line: 46}
+      - {rule: unbounded-module-container, function: "shop.jobs.create_job", file: shop/jobs.py, line: 26}
     must_be_absent:
       # decoys: correct code shaped like a bug
       - {rule: io-without-timeout, function: "shop.clients.pricing.PricingClient._price_bounded"}

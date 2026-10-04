@@ -82,6 +82,17 @@ RULES: dict[str, tuple[str, str, dict[str, re.Pattern]]] = {
         "java": _r(r"\.(executeQuery|executeUpdate|execute|createQuery|createNativeQuery|prepareStatement)\s*\(\s*\"[^\"]*\"\s*\+\s*\w"),
         "go": _r(r"\.(Query|QueryRow|Exec)(Context)?\s*\([^)]*(fmt\.Sprintf\(|\"[^\"]*\"\s*\+\s*\w)"),
     }),
+    "unsanitized-url-query": ("medium", "A value is spliced directly into a URL's query string (string concat "
+                              "or an f-string/template literal) instead of going through `params=`/a query "
+                              "builder. A `&`, `#`, `%` or newline in the value changes the request's meaning "
+                              "(an extra parameter, a truncated path, header or log injection) and anything the "
+                              "server doesn't expect breaks the request. Pass it as `params=` (requests/httpx) "
+                              "or a URL-encoding helper so it is percent-encoded.", {
+        "python": _r(r"""\.(get|post|put|patch|delete|request)\s*\(\s*f(["'])[^"']*\?[^"']*=\{[^}]+\}|"""
+                     r"""\.(get|post|put|patch|delete|request)\s*\(\s*[\w.]+\s*\+\s*["'][^"']*\?[^"']*=["']\s*\+\s*\w"""),
+        "javascript": _r(r"\.(get|post|fetch)\s*\(\s*`[^`]*\?[^`]*=\$\{[^}]+\}|fetch\s*\(\s*`[^`]*\?[^`]*=\$\{[^}]+\}"),
+        "typescript": _r(r"\.(get|post|fetch)\s*\(\s*`[^`]*\?[^`]*=\$\{[^}]+\}|fetch\s*\(\s*`[^`]*\?[^`]*=\$\{[^}]+\}"),
+    }),
     "backoff-without-jitter": ("low", "Retries back off but with no random jitter. Clients that failed together retry "
                                     "together, which turns a short outage into repeated load spikes. Add jitter.", {}),
 }

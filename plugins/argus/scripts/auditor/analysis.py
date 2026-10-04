@@ -37,6 +37,21 @@ DOWNGRADE = {"high": "medium", "medium": "low", "low": "low", "info": "info"}
 CONF_RANK = {"scip": 0, "exact": 0, "unique": 1, "heuristic": 1, "name": 2}
 # Short local syscalls block briefly; network, sleeps, processes and waits can block for seconds.
 BLOCK_SEVERITY = {FS: "medium", CPU: "medium"}
+# sqlite3 (including :memory:) is an in-process library call, not a network round trip: its worst case is
+# the 5s busy-timeout wait on a write lock, not "waits forever on a hung peer". A real network DB (Postgres,
+# MySQL, Mongo, Redis) keeps the default "high": a slow network peer can block indefinitely. Skipped when the
+# file also imports a networked DB library: the method-name heuristic that classified this call as sqlite3
+# (no receiver type check) could just as easily be *that* library's connection, and "high" is the safe default.
+_SQLITE_MARK = "sqlite3"
+_OTHER_DB_IMPORT = re.compile(r"^(psycopg2?|pymysql|MySQLdb|pymongo|redis|sqlalchemy|django\.db|asyncpg|motor|"
+                              r"databases|redis\.asyncio|aioredis)\b")
+
+
+def _block_severity(category: str, default_timeout: str | None, fctx: FileCtx | None = None) -> str:
+    if (category == DB and default_timeout and _SQLITE_MARK in default_timeout
+            and not (fctx and fctx.imported(_OTHER_DB_IMPORT))):
+        return "medium"
+    return BLOCK_SEVERITY.get(category, "high")
 CPU_MSG = ("Runs deliberately slow computation ({kind} `{what}`) on the async path. Key derivation and password "
            "hashing take tens to hundreds of milliseconds by design, and the whole time they hold {stall}; under "
            "load every request queues behind them. Run it in a thread or process pool (to_thread / run_in_executor).")
@@ -321,7 +336,7 @@ class RepoMap:
             fn, c, spec = fns[b.function], b.call, self.spec(fns[b.function])
             where = f"{'blocking ' if b.blocking else ''}{b.kind} `{c.snippet}`"
             if b.blocking and c.context == "async" and spec.has_async:
-                sev = BLOCK_SEVERITY.get(b.category, "high")
+                sev = _block_severity(b.category, b.default_timeout, self.files.get(fn.file))
                 cpu = b.category == CPU
                 F.append(self._finding(
                     "cpu-heavy-in-async" if cpu else "blocking-in-async", "low" if fn.is_startup else sev,
@@ -358,7 +373,8 @@ class RepoMap:
                 reported.add((e.caller, e.line))
                 names, terminal, confs = self._block_path(e.callee)
                 weakest = max([e.confidence, *confs], key=lambda c: CONF_RANK[c])
-                sev = BLOCK_SEVERITY.get(terminal.category, "high")
+                sev = _block_severity(terminal.category, terminal.default_timeout,
+                                      self.files.get(fns[terminal.function].file))
                 if weakest == "name":
                     sev = DOWNGRADE[sev]
                 if caller.is_startup:
@@ -402,6 +418,24 @@ class RepoMap:
                     + (", on a request path" if on_path else "") + ". "
                     "Candidate for complexity fitting with large inputs (M2).",
                 ))
+
+        for fn in fns.values():
+            for lp in fn.loops:
+                # A conditional loop that sleeps between checks, with no iteration cap, no deadline/elapsed
+                # check, no retry framing and no counter policy: it can only end when something external
+                # changes, and nothing here bounds how long that takes.
+                if (lp.kind == "conditional" and lp.sleep_s is not None and lp.bound is None
+                        and not lp.wall_bound and not lp.policy_bound and not lp.retryish and not lp.handles_errors):
+                    on_path = fn.is_entry or any(fns[r].is_entry for r in self._root_ids(fn.id))
+                    F.append(self._finding(
+                        "unbounded-wait-loop", "high" if on_path else "medium", "heuristic", fn, lp.line,
+                        "Polls a condition with no iteration cap and no deadline (no `time.time()`/`monotonic()` "
+                        "check against an elapsed bound). If the condition never becomes true, this loop runs "
+                        "forever" + (", holding the request open indefinitely" if on_path else "") + ". Add a "
+                        "deadline (compare elapsed time to a max) or a maximum number of iterations.",
+                        reached_from=self._roots(fn.id),
+                    ))
+                    break  # one lead per function: enough to send the investigator there
 
         for fn in fns.values():
             if fn.is_async and fn.scaling_depth >= 2 and not any(c.awaited and c.loop_depth for c in fn.calls):
