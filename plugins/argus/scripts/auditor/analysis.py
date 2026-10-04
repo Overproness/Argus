@@ -209,6 +209,15 @@ class RepoMap:
         recv = call.receiver
         if not recv or call.self_call:
             return None
+        if call.receiver_type is not None:
+            parts = call.receiver_type.split(".")
+            if len(parts) > 1 and parts[0] not in {"crate", "self", "super"}:
+                return [], "exact"  # known external type must not resolve to a repo lookalike
+            cls = parts[-1]
+            own = [f for f in self.methods_by_type.get((family(fn.lang), cls, call.name), [])
+                   if arity_ok(f, call) and visible(f, fn)]
+            local = [f for f in own if f.file == fn.file] or [f for f in own if f.module == fn.module]
+            return (local or own, "exact" if len(local or own) <= 1 else "name")
         key = recv.split(".")[-1]
         if recv.split(".")[0] not in self.spec(fn).self_names and "." in recv:
             return None  # a.b.c(): only plain names and self attributes are typed here
@@ -225,6 +234,8 @@ class RepoMap:
         self.unresolved: list[tuple[Function, Call]] = []
         for fn in self.functions.values():
             for call in fn.calls:
+                if call.receiver_fields:
+                    self._resolve_fields(fn, call)
                 cands, conf = self._candidates(fn, call)
                 if not cands:
                     self.unresolved.append((fn, call))
@@ -237,6 +248,21 @@ class RepoMap:
         for e in self.edges:
             self.out_edges[e.caller].append(e)
             self.in_edges[e.callee].append(e)
+
+    def _resolve_fields(self, fn: Function, call: Call):
+        typ = call.receiver_type
+        for field in call.receiver_fields:
+            parts = (typ or "").split(".")
+            if not typ or (len(parts) > 1 and parts[0] not in {"crate", "self", "super"}):
+                typ = None
+                break
+            candidates = [(ctx.rel, ctx.field_types[parts[-1]]) for ctx in self.files.values()
+                          if ctx.lang == fn.lang and parts[-1] in ctx.field_types]
+            local = [fields for path, fields in candidates if path == fn.file]
+            choices = local or [fields for _, fields in candidates]
+            typ = choices[0].get(field) if len(choices) == 1 else None
+        call.receiver_type = typ
+        call.receiver_fields = ()
 
     # classification -----------------------------------------------------------
     def _classify(self, fn: Function, call: Call) -> Boundary | None:
@@ -260,12 +286,14 @@ class RepoMap:
                 continue
             if rule.receiver is not None and not rule.receiver.search(call.receiver):
                 continue
+            if rule.receiver_type is not None and not rule.receiver_type.search(call.receiver_type or ""):
+                continue
             if rule.text is not None and not rule.text.search(call.snippet):
                 continue
             if rule.requires_import is not None and not fctx.imported(rule.requires_import):
                 continue
             return Boundary(fn.id, rule.kind, rule.category, rule.blocking, call,
-                            rule.confidence(), rule.default_timeout, rule.default_client, rule.client_level)
+                            rule.confidence(), rule.default_timeout, rule.default_client, rule.client_level, rule.timeout_note)
         return None
 
     # analysis -------------------------------------------------------------------
@@ -285,20 +313,30 @@ class RepoMap:
         fns = self.functions
         # Sync functions that can block, with the next hop as a witness (propagates to callers).
         blocks: dict[str, tuple] = {}
-        for b in self.boundaries:
+        block_severity = {}
+        for b in sorted(self.boundaries, key=lambda b: SEVERITY_ORDER[BLOCK_SEVERITY.get(b.category, "high")]):
             if b.blocking and b.call.context == "sync" and b.function not in blocks:
                 blocks[b.function] = ("boundary", b)
+                block_severity[b.function] = BLOCK_SEVERITY.get(b.category, "high")
         # Certain edges first, so witnesses prefer them over name-matched ones.
         for allowed in (("exact", "scip", "unique"), ("exact", "scip", "unique", "name")):
             changed = True
             while changed:
                 changed = False
                 for e in self.edges:
-                    if (e.confidence in allowed and e.context == "sync" and e.caller not in blocks
+                    if (e.confidence in allowed and e.context == "sync"
                             and e.callee in blocks and not fns[e.caller].is_async
                             and not fns[e.callee].is_async):
-                        blocks[e.caller] = ("call", e)
-                        changed = True
+                        sev = block_severity[e.callee]
+                        if e.confidence == "name":
+                            sev = DOWNGRADE[sev]
+                        if e.caller not in blocks or SEVERITY_ORDER[sev] < SEVERITY_ORDER[block_severity[e.caller]]:
+                            # A new local output boundary must not hide a more severe
+                            # network stall reached through a sync helper. Strict
+                            # improvement also keeps witness chains free of cycles.
+                            blocks[e.caller] = ("call", e)
+                            block_severity[e.caller] = sev
+                            changed = True
         self.blocks = blocks
 
         io_reach = {b.function for b in self.boundaries if b.category in (NET, DB)}
@@ -340,7 +378,7 @@ class RepoMap:
                     note = (f"No timeout at this call, but client timeouts are configured in "
                             f"{', '.join(configured[:2])}; confirm this call uses such a client.")
                 else:
-                    sev, note = "medium", "This library has no default timeout, so a hung peer waits forever."
+                    sev, note = "medium", b.timeout_note or "This library has no default timeout, so a hung peer waits forever."
                 F.append(self._finding(
                     "io-without-timeout", sev, b.confidence, fn, c.line,
                     f"External call without an explicit timeout ({where}). {note}",
@@ -498,7 +536,7 @@ class RepoMap:
     def bounded(self, b: Boundary) -> bool:
         if b.call.has_timeout:
             return True
-        return not b.default_client and self.files[self.functions[b.function].file].client_timeout
+        return b.client_level and not b.default_client and self.files[self.functions[b.function].file].client_timeout
 
     def _finding(self, rule, sev, conf, fn: Function, line, msg, chain=None, reached_from=None) -> Finding:
         return Finding(rule, sev, conf, fn.lang, fn.qualname, fn.file, line, msg,

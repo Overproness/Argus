@@ -1,5 +1,5 @@
-// Two types share the method name `quote`. Name matching links `run` to both;
-// SCIP links it only to `Live::quote`.
+// Two types share the method name `quote`. Local type evidence and SCIP
+// both link `run` only to `Live::quote`.
 struct Live;
 struct Cached;
 

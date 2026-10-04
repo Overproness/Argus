@@ -11,10 +11,11 @@ def _edges(m):
     return sorted((m.functions[e.caller].qualname, m.functions[e.callee].qualname, e.confidence) for e in m.edges)
 
 
-def test_name_based_resolution_is_ambiguous():
+def test_local_type_annotation_disambiguates_without_scip():
     m = RepoMap(FIXTURES / "scip_rust").load()
     run_targets = {c for a, c, _ in _edges(m) if a.endswith("::run")}
-    assert run_targets == {"scip_rust::Live::quote", "scip_rust::Cached::quote"}
+    assert run_targets == {"scip_rust::Live::quote"}
+    assert ("scip_rust::run", "scip_rust::Live::quote", "exact") in _edges(m)
 
 
 @pytest.mark.skipif(shutil.which("rust-analyzer") is None, reason="rust-analyzer not installed")
