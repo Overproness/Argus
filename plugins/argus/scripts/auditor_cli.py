@@ -343,6 +343,11 @@ def main() -> int:
             counts[t["outcome"]] = counts.get(t["outcome"], 0) + 1
         print(", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or res["output_tail"])
         print(f"python: {res['meta']['python']} ({res['meta']['python_why']})")
+        for m in res["meta"].get("auditor_mismatch", []):
+            print(f"warning: {m['file']} imported a different argus install ({m['imported']}) than this run "
+                  f"uses ({res['meta']['expected_auditor']}); its helpers (run_concurrently, repo_path, ...) "
+                  "and rule names may be stale. Run it only through this `repro` command, never `pytest` by "
+                  "hand.", file=sys.stderr)
         if args.file:
             mine = [t for t in res["tests"] if t["file"] == args.file.name]
             for t in mine:

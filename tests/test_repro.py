@@ -203,3 +203,13 @@ def test_repo_venv_is_preferred(tmp_path, monkeypatch):
     py, why = runner.pick_python(tmp_path, tmp_path / ".audit")
     assert py == sys.executable and "no repo environment" in why
     assert runner.pick_python(tmp_path, tmp_path / ".audit", "/x/python")[0] == "/x/python"
+
+
+def test_imported_auditor_is_reported_and_matches(tmp_path):
+    """The marker line fires every run (diagnostic for a stale/wrong auditor install on PYTHONPATH), and
+    under normal operation it matches this repo's own auditor package."""
+    f = _write(tmp_path, "test_ok.py", "def test_ok():\n    pass\n")
+    res = runner.run(tmp_path, tmp_path / ".audit", f)
+    assert res["meta"]["auditor_mismatch"] == []
+    rp = runner.results_dir(tmp_path / ".audit") / f"{f.stem}.json"
+    assert json.loads(rp.read_text())["imported_auditor"] is not None

@@ -42,6 +42,14 @@ The prompt gives you the plugin root and one queue item from
   severity, line, message, chain, and possibly trace evidence or `given`. The
   top-level id, rule, line and message are the first of them.
 - `lang`, `function`, `harness` (how this language can be reproduced).
+- `repro_skeleton`: a file already sitting at this path with the imports and
+  the evidence/assert shape for the first finding's rule filled in, and
+  `# TODO` lines marking what is specific to this finding. **Start from this
+  file, not a blank one.** Read it, fill in the TODOs (the trigger, and any
+  call the template left as a placeholder), and extend it with one `test_`
+  function per remaining finding in `findings`, following the same shape (see
+  the rule table in step 3a). If a finding's rule has no template, the file
+  says so and points at the matching table row instead.
 
 Read `<repo>/.audit/map.md` and `<repo>/.audit/trace.md` for context if they exist.
 
@@ -134,7 +142,37 @@ paths with `repo_path("app", "main.py")`. If the code writes relative files
 | sql-injection | monkeypatch the connection to a seeded `tmp_path` SQLite DB, call with `' OR '1'='1` (or a quote that breaks the syntax) | rows outside the filter come back, or `sqlite3.OperationalError` shows the input reached the SQL text |
 | uncommitted-write | monkeypatch the connection to a `tmp_path` DB file, call once, read back through a second connection | the row is not visible to the second connection |
 | fire-and-forget-task | `loop.set_exception_handler(...)` to capture, run the handler, let the task finish, `gc.collect()` | the task's exception reached only the loop's "never retrieved" handler: no caller saw it |
+| blocking-in-async (future/thread) | `latency(t)` on the dependency, then `call_with_deadline(lambda: asyncio.run(handler(...)), 3)` around a call whose chain reaches `.result()`/`.join()` | `async with loop_monitor() as m:` around the same call shows `m.max_lag >= 0.8 * t`: the wait happened on the loop thread, not in a worker |
+| unbounded-wait-loop | monkeypatch the condition so it never flips true, then `call_with_deadline(lambda: asyncio.run(handler(...)), 3)` | `not result["returned"]`: the loop never gives up |
+| unbounded-module-container | call the growing function N times, inspect the module's container directly (`len(module._jobs)`) | `len(...) == N` with nothing evicted; or `with thread_growth()`/a memory probe if the container isn't importable |
+| client-per-call | `with peak_concurrency(module, "<ClientClass>.__init__")` (or `count_calls`) around N calls | `box["calls"] == N`: a new client every call, instead of one reused |
+| unchecked-response | point the dependency at a `fault_server(status=500, body="not json")` (or monkeypatch the client to return a 500), call once | the function returns/caches the error body as if it were data, instead of raising |
+| unsanitized-url-query | call with a value containing `&evil=1` or `\r\nX-Injected: 1`, inspect what the fake peer actually received (`fault_server`'s `srv.summary()["requests"]`, or a local `http.server` handler that echoes the raw request line) | the extra parameter/header reached the peer unescaped, changing the request |
 | propagated:* | the trigger from `given.repro_file`, applied to the caller | the caller shows the effect (loop lag, missed deadline, attempt count) |
+
+**Worked example** (race-across-await, the shape most investigators get wrong first):
+```python
+import asyncio
+from auditor.repro.harness import evidence, run_concurrently, repo_path
+
+def test_incr_lost_update(monkeypatch):
+    import app.main as main
+    monkeypatch.setattr(main, "counter", 0)  # reset shared state; never `main.counter = 0` by hand
+    asyncio.run(run_concurrently(main.incr, 50))
+    evidence(finding="race-across-await@app.incr:46", final=main.counter, expected=50)
+    assert main.counter < 50  # lost updates: fewer than 50 increments landed
+```
+`run_concurrently` and `repo_path` are real functions in `auditor/repro/harness.py` on this repo's own
+checkout — read that file if you are unsure a helper exists, never assume it is missing because a search
+in the wrong tree didn't find it (see the wrong-tree check above).
+
+**Never hand-run `pytest` directly**, even to debug. `python ".../auditor_cli.py" repro ... --file ...`
+is the only supported way to run a reproduction: it sets `PYTHONPATH` to this plugin's own `scripts/`
+directory first, so the test imports this repo's `auditor.repro.harness`, not a stale copy installed
+elsewhere that may be missing a helper or have different rule names. Every run also prints which
+`auditor` package it imported; if `repro`'s output warns of an `auditor_mismatch`, stop and report
+`inconclusive` with `"blocked_by": "environment"` rather than trying to work around a helper that "doesn't
+exist" — it exists in the right install.
 
 ### 3b. Every other language: fault server plus black-box or native probe
 
@@ -243,7 +281,8 @@ installed". Do not substitute a Python imitation of the code.
      "reason": "for rejected or inconclusive: why, in one sentence",
      "blocked_by": "for inconclusive: wrong-tree | environment | toolchain | infrastructure | repro-error | budget",
      "env_workaround": "only if you had to work around imports; what you replaced",
-     "wrong_edge": ["caller", "callee"]
+     "wrong_edge": ["caller", "callee"],
+     "wrong_pattern": false
    }]
    ```
    Use each `finding` id exactly as given in the item. Settle the
@@ -254,6 +293,16 @@ installed". Do not substitute a Python imitation of the code.
    when you reject because a step of the chain calls a different function than
    the map claims (use qualnames as in the chain). The queue then suppresses
    every other finding that relies on that edge.
+
+   Set `wrong_pattern: true` on a `rejected` verdict when the reason is about the **rule's heuristic**, not
+   this one call: the rule matched real code, but what it matched isn't the risk it claims (a single-row
+   primary-key lookup on an in-memory `:memory:` table flagged `io-in-loop`; a `while` loop the rule read as
+   unbounded that is actually capped by the caller one frame up). This is a judgment call, not a structural
+   fact like `wrong_edge`, so the queue never deletes other findings of that rule for it — it only lowers
+   their priority and notes the rejection, so a human skimming the report sees the pattern. Do not set it
+   just because this one instance happened to be a false positive for an ordinary, case-specific reason
+   (wrong tree, stale map, a timeout configured elsewhere); it is for "this rule's premise doesn't hold for
+   this *kind* of call."
 
 ## What makes a repro valid
 

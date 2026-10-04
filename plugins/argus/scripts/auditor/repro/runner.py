@@ -113,6 +113,10 @@ def _env(repo: Path) -> dict:
     return env
 
 
+AUDITOR_MARKER = "@@argus-auditor "
+EXPECTED_AUDITOR = str(SCRIPTS_DIR / "auditor" / "__init__.py")
+
+
 def run_pytest(repo: Path, files: list[Path], junit: Path, timeout: int, python: str | None = None) -> tuple[int, str]:
     cmd = [python or sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "auditor.repro.isolation",
            "--tb=short", "-o", "addopts=", "-o", "junit_logging=system-out", f"--junitxml={junit}",
@@ -122,7 +126,14 @@ def run_pytest(repo: Path, files: list[Path], junit: Path, timeout: int, python:
     except subprocess.TimeoutExpired as e:
         out = e.stdout.decode("utf8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
         return 124, f"timed out after {timeout}s\n{out[-2000:]}"
-    return r.returncode, (r.stdout + r.stderr)[-4000:]
+    return r.returncode, r.stdout + r.stderr
+
+
+def _imported_auditor(output: str) -> str | None:
+    for line in output.splitlines():
+        if line.startswith(AUDITOR_MARKER):
+            return line[len(AUDITOR_MARKER):].strip()
+    return None
 
 
 def parse_junit(path: Path, file_name: str | None = None) -> list[dict]:
@@ -157,14 +168,19 @@ def run_file(repo: Path, f: Path, timeout: int, python: str) -> dict:
     """One reproduction file in its own pytest process: {file, exit_code, output_tail, tests, ran_at}."""
     with tempfile.TemporaryDirectory(prefix="argus-junit-") as tmp:
         junit = Path(tmp) / "results.xml"
-        rc, tail = run_pytest(repo, [f], junit, timeout, python)
+        rc, output = run_pytest(repo, [f], junit, timeout, python)
         tests = parse_junit(junit, f.name)
+    tail = output[-4000:]
+    imported = _imported_auditor(output)
+    mismatch = (imported is not None and os.path.normcase(os.path.realpath(imported))
+                != os.path.normcase(os.path.realpath(EXPECTED_AUDITOR)))
     if not tests and rc not in (0, 5):
         # Collection error, import error or timeout: no testcase to attach it to, so make one.
         tests = [{"file": f.name, "test": f.stem, "outcome": "error", "time_s": 0.0,
                   "message": tail[-800:], "evidence": [], "finding": None}]
     return {"file": f.name, "exit_code": rc, "output_tail": tail if rc not in (0, 1) else "",
-            "tests": tests, "ran_at": now(), "python": python}
+            "tests": tests, "ran_at": now(), "python": python,
+            "imported_auditor": imported, "auditor_mismatch": mismatch}
 
 
 def now() -> str:
@@ -221,7 +237,7 @@ def results_dir(out_dir: Path) -> Path:
 def aggregate(out_dir: Path, python: str | None = None, why: str | None = None) -> dict:
     """repro.json from the latest per-file results; files that no longer exist are dropped."""
     repro_dir = out_dir / "repros"
-    tests, files, rcs, tails, ran = [], [], [], [], {}
+    tests, files, rcs, tails, ran, mismatched = [], [], [], [], {}, []
     for rp in sorted(results_dir(out_dir).glob("*.json")):
         try:
             r = json.loads(rp.read_text(encoding="utf8"))
@@ -236,11 +252,14 @@ def aggregate(out_dir: Path, python: str | None = None, why: str | None = None) 
         ran[r["file"]] = r["ran_at"]
         if r["output_tail"]:
             tails.append(f"--- {r['file']} (exit {r['exit_code']})\n{r['output_tail']}")
+        if r.get("auditor_mismatch"):
+            mismatched.append({"file": r["file"], "imported": r.get("imported_auditor")})
         python = python or r.get("python")
     bad = [c for c in rcs if c not in (0, 1, 5)]
     return {
         "meta": {"tool": "argus/repro", "generated_at": now(), "files": files, "ran_at": ran,
-                 "python": python, "python_why": why, "isolation": "one process per file"},
+                 "python": python, "python_why": why, "isolation": "one process per file",
+                 "expected_auditor": EXPECTED_AUDITOR, "auditor_mismatch": mismatched},
         "tests": tests, "exit_code": bad[0] if bad else (1 if 1 in rcs else 0),
         "output_tail": "\n".join(tails)[-4000:],
     }
