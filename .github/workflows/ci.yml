@@ -43,8 +43,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: {python-version: "3.12"}
-      - run: pip install -r plugins/argus/requirements.txt -r tests/eval/requirements.txt
+      - run: pip install -r plugins/argus/requirements.txt -r tests/eval/requirements.txt  # pytest is in the first file
       - run: python tests/eval/run.py --json eval-summary.json
+      # score_investigation.py's own tests (cheap, local, no `kind: git` cloning): kept with the eval job
+      # because it needs PyYAML too, not because it's slow.
+      - run: python -m pytest tests/eval/test_score_investigation.py -q
       - if: always()
         uses: actions/upload-artifact@v4
         with: {name: eval-summary, path: eval-summary.json}
