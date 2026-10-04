@@ -61,12 +61,20 @@ It produces:
     program in the target language, in a side project that depends on the repo
     by path;
   - probes are verified for Rust, JavaScript, TypeScript, Java, Go, C and C++;
+
 - budgeted rounds (M4): a deterministic queue picks what to reproduce next,
   follows confirmed effects up to their callers, and suppresses findings whose
   call edge an investigator rejected;
 - a final report (`report.html`, `report.md`, `report.json`) that ranks every
   finding by how far it got: proven, observed, unverified, inconclusive,
   not observed, rejected.
+
+Rust I/O mapping includes standard output macros, typed file handles, and
+blocking or awaited nonblocking Solana RPC clients. It follows simple local
+macros that await expression arguments, as well as `tokio::join!`/`try_join!`.
+Python mapping includes implicit reads in `async for` over generated
+`grpc.aio` streams. Subscription deadlines and enclosing read deadlines are
+recognized; an independent cancellation watchdog still needs investigation.
 
 **Getting started needs nothing but Python 3.12+.** `pip install` is optional:
 the first time the CLI or the MCP server runs on a machine without

@@ -23,6 +23,8 @@ class Call:
     stmt_line: int = 0  # first line of the enclosing statement
     timeout_s: float | None = None  # parsed deadline/timeout value, when has_timeout
     tail: str = ""  # statement text right after this call (what happens to its result)
+    receiver_type: str | None = None  # conservative language-local type evidence for boundary rules
+    receiver_fields: tuple[str, ...] = ()  # fields still to resolve on that type
 
 
 @dataclass
@@ -102,6 +104,7 @@ class FileCtx:
     # Receiver name -> class name, for `x = Foo(...)`, `self.x = Foo(...)`, `self.x = x` with `x: Foo`
     # (None when the same name is bound to two classes). Lets `x.wait()` resolve to Foo.wait by type.
     instances: dict[str, str | None] = field(default_factory=dict)
+    field_types: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def imported(self, rx) -> bool:
         return any(rx.search(v) for v in self.imports.values())
@@ -131,6 +134,7 @@ class Boundary:
     default_timeout: str | None
     default_client: bool = False
     client_level: bool = True  # a timeout could be configured on the client object elsewhere
+    timeout_note: str | None = None
 
 
 @dataclass

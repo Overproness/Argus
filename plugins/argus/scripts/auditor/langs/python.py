@@ -30,6 +30,67 @@ def imports(root):
     return out
 
 
+def grpc_stream_reads(fn_node, body, imported):
+    """Expose implicit network reads from generated grpc.aio streaming stubs.
+
+    An arbitrary async iterator or a method called Subscribe is not enough:
+    require a generated stub constructed with a known aio channel. Deadlines
+    on the subscription or around the read are respected by normal analysis.
+    """
+    def path(node):
+        s = text(node)
+        first, dot, rest = s.partition(".")
+        return imported.get(first, first) + (dot + rest if dot else "")
+
+    channels, stubs, streams = set(), set(), {}
+    hits = []
+    for n in walk(body, _skip_nested):
+        if n.type == "with_item":
+            value = n.child_by_field_name("value")
+            if value is not None and value.type == "as_pattern":
+                call = value.named_children[0]
+                alias = value.child_by_field_name("alias")
+                if call.type == "call" and path(call.child_by_field_name("function")) in {
+                        "grpc.aio.secure_channel", "grpc.aio.insecure_channel"}:
+                    channels.add(text(alias))
+        elif n.type == "assignment":
+            left, right = n.child_by_field_name("left"), n.child_by_field_name("right")
+            name = text(left)
+            channels.discard(name)
+            stubs.discard(name)
+            streams.pop(name, None)
+            if right is None or right.type != "call":
+                continue
+            func = right.child_by_field_name("function")
+            args = right.child_by_field_name("arguments")
+            p = path(func)
+            if p in {"grpc.aio.secure_channel", "grpc.aio.insecure_channel"}:
+                channels.add(name)
+            elif re.search(r"(?:^|\.)\w+_pb2_grpc\.\w+Stub$", p) and args is not None and any(
+                    text(a) in channels for a in args.named_children):
+                stubs.add(name)
+            elif func is not None and func.type == "attribute" and text(func.child_by_field_name("object")) in stubs:
+                streams[name] = bool(args is not None and any(
+                    a.type == "keyword_argument" and text(a.child_by_field_name("name")) == "timeout"
+                    and text(a.child_by_field_name("value")) not in {"None", ""}
+                    for a in args.named_children))
+            elif func is not None and func.type == "attribute" and text(func.child_by_field_name("attribute")) == "__aiter__":
+                receiver = text(func.child_by_field_name("object"))
+                if receiver in streams:
+                    streams[name] = streams[receiver]
+        elif n.type == "for_statement" and text(n).lstrip().startswith("async for "):
+            right = n.child_by_field_name("right")
+            if text(right) in streams:
+                hits.append(("grpc.aio.stream_read", right, streams[text(right)]))
+        elif n.type == "call":
+            func = n.child_by_field_name("function")
+            if func is not None and func.type == "attribute" and text(func.child_by_field_name("attribute")) in {"__anext__", "read"}:
+                receiver = text(func.child_by_field_name("object"))
+                if receiver in streams:
+                    hits.append(("grpc.aio.stream_read", n, streams[receiver]))
+    return hits
+
+
 LOCKISH = re.compile(r"(?i)(^|[._])(r?lock|mutex|sem(aphore)?|cond(ition)?)\w*$|lock\b")
 MUTATORS = frozenset({"append", "extend", "insert", "remove", "pop", "popitem", "clear", "update", "setdefault",
                       "add", "discard", "appendleft", "popleft", "sort", "reverse"})
@@ -588,6 +649,7 @@ SPEC = LangSpec(
         r"|@(\w+\.)?(task|shared_task)\b"
     ),
     rules=[
+        R("rpc", NET, path=r"^grpc\.aio\.stream_read$", awaited=True, client_level=False),
         R("http", NET, path=r"^requests\.", blocking=True, exclude_names=PY_CTOR, default_client=True),
         R("http", NET, methods=HTTP_VERBS, receiver=r"(?i)session|client|http|requests", imp=r"^requests\b",
           blocking=True, client_level=False),
@@ -633,6 +695,7 @@ SPEC = LangSpec(
     imports=imports,
     hooks=[locks, race_across_await, mutate_while_iterating, threads_and_fanout, uncommitted_write,
            unbounded_module_container, client_per_call, unchecked_response],
+    implicit_calls=grpc_stream_reads,
     startup=re.compile(r"on_event\(\s*['\"]startup|\.on_startup\b|\blifespan\b"),
     stall_phrase="the asyncio event loop, freezing every coroutine",
     scip_indexer="scip-python",

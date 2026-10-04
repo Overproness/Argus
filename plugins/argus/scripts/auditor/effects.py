@@ -77,7 +77,7 @@ class Effects:
         if c.has_timeout:
             return (c.timeout_s if c.timeout_s is not None else BOUNDED), f"timeout {fmt(c.timeout_s)}"
         fctx = self.m.files[fn.file]
-        if fctx.client_timeout and not b.default_client:
+        if b.client_level and fctx.client_timeout and not b.default_client:
             return (fctx.client_timeout_s or BOUNDED), f"client timeout {fmt(fctx.client_timeout_s)}"
         d = parse_default(b.default_timeout)
         if d is not None:

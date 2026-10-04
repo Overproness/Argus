@@ -437,6 +437,8 @@ class FileExtractor:
         self.src_text = self.src.decode("utf8", "replace")
         m = spec.client_timeout.search(self.src_text) if spec.client_timeout else None
         self.fctx = FileCtx(self.rel, spec.name, imports, m is not None)
+        if spec.field_types:
+            self.fctx.field_types = spec.field_types(self.tree.root_node, imports)
         if m is not None:  # the value, when it sits next to the configuration
             self.fctx.client_timeout_s = parse_duration(self.src_text[m.start():m.end() + 160], spec.name)
         else:
@@ -445,6 +447,8 @@ class FileExtractor:
             self.fctx.instances = _py_instances(self.src_text)
         self.functions: list[Function] = []
         self.hook_hits: list[tuple[str, HookHit]] = []
+        self.bindings = {}
+        self.macro_await_args = spec.macro_await_args(self.tree.root_node) if spec.macro_await_args else {}
 
     # structure -----------------------------------------------------------
     def _is_named_lambda(self, n: Node) -> bool:
@@ -520,6 +524,7 @@ class FileExtractor:
         fn.retry = _retry_decorator(prefix + "\n" + header)
         fn.depth_guard = bool(_DEPTH_PARAM.search(header) and body is not None and _DEPTH_CHECK.search(text(body)))
         scan = body if body is not None else node
+        self.bindings = spec.bindings(node, scan, self.fctx.imports) if spec.bindings else {}
         nesting = 0
         stack = [(scan, 0)]
         while stack:
@@ -543,6 +548,13 @@ class FileExtractor:
                 if not self._is_function(c):
                     stack.append((c, d))
         fn.calls.sort(key=lambda c: (c.line, len(c.raw)))  # inner calls of a chain first
+        if spec.implicit_calls:
+            for raw, implicit, bounded in spec.implicit_calls(node, scan, self.fctx.imports):
+                call = self._call(raw, True, implicit.start_point[0] + 1, implicit, True, fn, scan, self_names, None,
+                                  check_timeout_text=False)
+                call.has_timeout |= bounded
+                fn.calls.append(call)
+            fn.calls.sort(key=lambda c: (c.line, len(c.raw)))
         fn.max_loop_depth = max([nesting, *(c.loop_depth for c in fn.calls)])
         for hook in spec.hooks:
             self.hook_hits += [(fn.id, h) for h in hook(spec, node, scan, is_async)]
@@ -601,13 +613,16 @@ class FileExtractor:
         fixed = (kind == "counted" and bound is not None) or (
             kind == "collection" and bool(_FIXED_ITERABLE.search(head)))
         wall_bound = bool(_WALL_BOUND.search(head)) or bool(_WALL_BOUND.search(body_text[:2000]))
+        policy_bound = bool(_POLICY_BOUND.search(body_text))
+        if self.spec.retry_policy_bound and body is not None:
+            policy_bound = self.spec.retry_policy_bound(n, body, policy_bound)
         return LoopInfo(
             line=n.start_point[0] + 1, end_line=n.end_point[0] + 1, kind=kind, bound=bound,
             handles_errors=bool(_HANDLES.search(body_text)), sleep_s=sleep_s,
             exponential=sleep_s is not None and bool(_EXPO.search(body_text)),
             exits=bool(re.search(r"\b(break|return)\b", body_text)),
             retryish=bool(re.search(r"(?i)(attempt|retr(y|ies)|tries|backoff)", header + body_text)),
-            policy_bound=bool(_POLICY_BOUND.search(body_text)),
+            policy_bound=policy_bound,
             hot_error_path=hot_error_path, fixed=fixed, wall_bound=wall_bound, span=(n.start_byte, n.end_byte),
         )
 
@@ -619,23 +634,48 @@ class FileExtractor:
         if tt is None:
             return []
         inner = text(tt)
+        # Token trees include strings/comments. Their text is data, not calls;
+        # mask it while preserving offsets and newlines used for locations.
+        masked = list(inner)
+        for literal in walk(tt):
+            if literal.type in {"string_literal", "raw_string_literal", "char_literal", "line_comment", "block_comment"}:
+                lo, hi = literal.start_byte - tt.start_byte, literal.end_byte - tt.start_byte
+                # tree-sitter offsets count UTF-8 bytes, Python strings count characters.
+                lo = len(tt.text[:lo].decode("utf8", "replace"))
+                hi = len(tt.text[:hi].decode("utf8", "replace"))
+                masked[lo:hi] = ["\n" if c == "\n" else " " for c in inner[lo:hi]]
+        masked = "".join(masked)
         awaits_all = bool(self.spec.macro_awaits and self.spec.macro_awaits.search(macro))
+        awaited_args = self.macro_await_args.get(macro, set())
         out = []
-        for m in _MACRO_CALL.finditer(inner):
+        resolved = canon(macro, self.fctx.imports)
+        if resolved == macro and "." not in macro:
+            resolved = "std." + macro
+        if resolved in self.spec.builtin_io_macros:
+            out.append(self._call(resolved, True, node.start_point[0] + 1, node, False,
+                                  fn, body, self_names, None))
+        for m in _MACRO_CALL.finditer(masked):
             raw = m.group(1)
             if raw.split("::")[-1].split(".")[-1].strip() in _NOT_CALLS:
                 continue
             if m.start(1) > 0 and inner[m.start(1) - 1] == ".":
                 raw = "_chain." + raw  # method on the result of an earlier call
-            close = _matching_paren(inner, m.end() - 1)
-            awaited = awaits_all or inner[close + 1:close + 8].lstrip().startswith(".await")
+            close = _matching_paren(masked, m.end() - 1)
+            arg_index, depth = 0, 0
+            for ch in masked[:m.start(1)]:
+                if ch == "," and depth == 1:
+                    arg_index += 1
+                depth += ch in "({["
+                depth -= ch in ")}]"
+            awaited = awaits_all or arg_index in awaited_args or masked[close + 1:close + 8].lstrip().startswith(".await")
             line = tt.start_point[0] + 1 + inner.count("\n", 0, m.start(1))
             argc = len(split_top(inner[m.end():close]))
             out.append(self._call(raw, "::" in raw, line, node, awaited, fn, body, self_names, argc))
         return out
 
     def _call(self, raw: str, scoped: bool, line: int, call: Node, awaited: bool,
-              fn: Function, body: Node, self_names: set[str], argc: int | None) -> Call:
+              fn: Function, body: Node, self_names: set[str], argc: int | None,
+              check_timeout_text: bool = True) -> Call:
         spec, imports = self.spec, self.fctx.imports
         norm = normalize(raw)
         recv, _, name = norm.rpartition(".")
@@ -703,7 +743,7 @@ class FileExtractor:
         tail = ""
         if call.type in spec.call_types and stmt.start_byte <= call.end_byte <= stmt.end_byte:
             tail = stmt.text[call.end_byte - stmt.start_byte:][:120].decode("utf8", "replace")
-        if spec.timeout_text is not None and spec.timeout_text.search(stmt_text[:2000]):
+        if check_timeout_text and spec.timeout_text is not None and spec.timeout_text.search(stmt_text[:2000]):
             has_timeout = True
         timeout_s = None
         if deadline_text:
@@ -713,6 +753,7 @@ class FileExtractor:
             if timeout_s is None and "ctx" in stmt_text:  # Go: deadline set on the context earlier
                 m = re.search(r"With(Timeout|Deadline)\([^\n]*", text(body)[: max(0, call.start_byte - body.start_byte)])
                 timeout_s = parse_duration(m.group(0), spec.name) if m else None
+        receiver_type, receiver_fields = self._receiver_type(recv, call.start_byte)
         return Call(
             name=name, raw=re.sub(r"\s+", " ", raw)[:120],
             path=canon(norm, imports) if norm else name,
@@ -728,4 +769,16 @@ class FileExtractor:
             stmt_line=stmt.start_point[0] + 1,
             timeout_s=timeout_s,
             tail=tail,
+            receiver_type=receiver_type, receiver_fields=receiver_fields,
         )
+
+    def _receiver_type(self, receiver: str, byte: int) -> tuple[str | None, tuple[str, ...]]:
+        # Only propagate through identity-like wrappers, never arbitrary method results.
+        receiver = re.sub(r"\.(as_ref|as_mut|unwrap|expect|clone|lock)(?=\.|$)", "", receiver)
+        parts = receiver.split(".")
+        for length in range(len(parts), 0, -1):
+            key = ".".join(parts[:length])
+            prior = [(pos, typ) for pos, end, typ in self.bindings.get(key, []) if pos <= byte < end]
+            if prior:
+                return max(prior, key=lambda item: item[0])[1], tuple(parts[length:])
+        return None, ()

@@ -43,10 +43,12 @@ class Rule:
     requires_import: re.Pattern | None = None
     name: re.Pattern | None = None  # matches the called name (any call kind)
     receiver: re.Pattern | None = None  # matches the normalized receiver text
+    receiver_type: re.Pattern | None = None  # requires positive type evidence, not just an import
     text: re.Pattern | None = None  # matches the statement text
     blocking: bool = False  # blocks the calling thread (only when not awaited)
     awaited: bool | None = None  # True: only if awaited, False: only if not, None: either
     default_timeout: str | None = None  # None: the library has no default timeout
+    timeout_note: str | None = None  # operation-specific explanation when no overall bound is known
     exclude_names: re.Pattern | None = None
     conf: str | None = None
     default_client: bool = False  # uses a global client, so file-level client timeouts don't apply
@@ -62,7 +64,7 @@ def _rx(v):
     return re.compile(v) if isinstance(v, str) else v
 
 
-def R(kind, category, path=None, methods=None, imp=None, name=None, receiver=None, text=None, **kw) -> Rule:
+def R(kind, category, path=None, methods=None, imp=None, name=None, receiver=None, text=None, receiver_type=None, **kw) -> Rule:
     return Rule(
         kind=kind,
         category=category,
@@ -71,6 +73,7 @@ def R(kind, category, path=None, methods=None, imp=None, name=None, receiver=Non
         requires_import=_rx(imp),
         name=_rx(name),
         receiver=_rx(receiver),
+        receiver_type=_rx(receiver_type),
         text=_rx(text),
         **kw,
     )
@@ -123,6 +126,12 @@ class LangSpec:
     private_of: Callable | None = None  # (fn_node, name, header) -> bool; overrides private_header
     macro_types: frozenset[str] = frozenset()  # unparsed token trees scanned for calls (Rust macros)
     macro_awaits: re.Pattern | None = None  # macros whose inner futures are awaited (select!, join!)
+    macro_await_args: Callable | None = None  # root -> {local macro name: awaited argument indices}
+    builtin_io_macros: frozenset[str] = frozenset()  # canonical paths; shadowed names excluded
+    bindings: Callable | None = None  # (fn_node, body, imports) -> {receiver: [(start, end, type)]}
+    field_types: Callable | None = None  # (root, imports) -> {struct: {field: canonical type}}
+    implicit_calls: Callable | None = None  # (fn_node, body, imports) -> [(raw, node, has_timeout)]
+    retry_policy_bound: Callable | None = None  # (loop_node, body, text_hint) -> bool
     stall_phrase: str = "the calling thread"
     scip_indexer: str | None = None  # key into scip.INDEXERS
 
