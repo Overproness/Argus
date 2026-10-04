@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 target/
 tests/eval/.cache/
+
+rug_advisor/
+swapper2_rust_code/
