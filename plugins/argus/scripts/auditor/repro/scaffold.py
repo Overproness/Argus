@@ -10,6 +10,8 @@ for a passing reproduction.
 """
 from __future__ import annotations
 
+import re
+
 HEADER = '''"""Reproduction for {rule}@{function}:{line}.
 
 {message}
@@ -28,7 +30,11 @@ FOOTER = '''
 
 
 def _test_name(function: str) -> str:
-    return function.rsplit(".", 1)[-1].replace("-", "_") or "target"
+    """The audited function's own name as an identifier. Ids look like `mod.fn`, `crate::mod::fn` or
+    `pkg/mod.(*T).Method` depending on the language, and the result is used in both a filename (no `:` on
+    Windows) and a `def`, so everything that isn't a name character is a separator or becomes `_`."""
+    last = re.split(r"::|[./#:]", function)[-1]
+    return re.sub(r"\W", "_", last) or "target"
 
 
 # Each template is a (import_lines, body) pair. `{fid}` is substituted with the finding id, `{fn}` with

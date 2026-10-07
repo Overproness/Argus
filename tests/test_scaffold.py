@@ -24,6 +24,18 @@ def test_propagated_rule_uses_the_base_rule_template():
     assert "sqlite3" in scaffold.generate(item)  # the sql-injection template, not the generic fallback
 
 
+def test_non_python_function_ids_give_a_valid_filename_and_def(tmp_path):
+    # Rust/Go/C++ ids contain `::`, `/`, `(*T)`: the skeleton's filename must exist on Windows and its `def` parse.
+    for fid, name in (("feed::tick", "tick"), ("crate::feed::Feed::new", "new"),
+                      ("pkg/mod.(*Client).Do", "Do"), ("ns::run<T>", "run_T_")):
+        item = {"function": fid, "line": 3,
+                "findings": [{"id": f"io-without-timeout@{fid}:3", "rule": "io-without-timeout",
+                              "line": 3, "message": "m"}]}
+        p = scaffold.write(item, tmp_path)
+        assert p.name == f"test_{name}.py" and p.exists()
+        ast.parse(p.read_text(encoding="utf8"))
+
+
 def test_write_never_overwrites_an_existing_file(tmp_path):
     item = {"function": "app.get_job", "line": 10,
             "findings": [{"id": "io-without-timeout@app.get_job:10", "rule": "io-without-timeout",
