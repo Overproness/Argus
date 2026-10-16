@@ -30,7 +30,11 @@ jobs:
         with: {go-version: stable}
       - run: npm install -g tsx
       - run: pip install -r plugins/argus/requirements.txt -r tests/fixtures/main_py_comparison/requirements.txt
-      - run: python -m pytest tests -q -rs --basetemp=.audit/ci-tests
+      - name: Run tests
+        run: |
+          # pytest creates --basetemp itself, but requires its parent to exist.
+          python -c "from pathlib import Path; Path('.audit').mkdir(exist_ok=True)"
+          python -m pytest tests -q -rs --basetemp=.audit/ci-tests
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
