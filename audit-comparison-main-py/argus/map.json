@@ -1,0 +1,765 @@
+{
+  "meta": {
+    "tool": "argus/map",
+    "version": 2,
+    "root": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target",
+    "path_warnings": [],
+    "generated_at": "2026-10-14T12:39:33+00:00",
+    "languages": {
+      "python": 2
+    },
+    "resolution": {
+      "scip_files": 0,
+      "name_based_files": 2
+    },
+    "include_tests": false,
+    "parse_errors": [],
+    "skipped_large_files": []
+  },
+  "stats": {
+    "files": 2,
+    "functions": 8,
+    "async_functions": 7,
+    "edges": 7,
+    "boundaries": 10,
+    "findings": 21,
+    "by_severity": {
+      "high": 5,
+      "medium": 16
+    }
+  },
+  "findings": [
+    {
+      "rule": "blocking-in-async",
+      "severity": "high",
+      "confidence": "exact",
+      "lang": "python",
+      "function": "app.health",
+      "file": "app/main.py",
+      "line": 34,
+      "message": "Blocking call on an async path (blocking sleep `time.sleep(0.05)`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "high",
+      "confidence": "exact",
+      "lang": "python",
+      "function": "app.process_job",
+      "file": "app/main.py",
+      "line": 52,
+      "message": "Blocking call on an async path (blocking sleep `time.sleep(0.2)`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": [
+        "app.create_job"
+      ]
+    },
+    {
+      "rule": "unbounded-wait-loop",
+      "severity": "high",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.get_job",
+      "file": "app/main.py",
+      "line": 65,
+      "message": "Polls a condition with no iteration cap and no deadline (no `time.time()`/`monotonic()` check against an elapsed bound). If the condition never becomes true, this loop runs forever, holding the request open indefinitely. Add a deadline (compare elapsed time to a max) or a maximum number of iterations.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "race-across-await",
+      "severity": "high",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.fetch_remote",
+      "file": "app/main.py",
+      "line": 74,
+      "message": "Shared `CACHE` is read here and written at line 81, with an `await` in between. Other requests and tasks run during the await and change it, so this write loses their update or acts on a stale check (lost update, check-then-act, double spend). Hold one asyncio.Lock across the read and the write, or remove the await between them.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "high",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.run_batch",
+      "file": "app/main.py",
+      "line": 89,
+      "message": "Blocking call on an async path (blocking future `results = [future.result() for future in futures]`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "unbounded-module-container",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.record_request",
+      "file": "app/main.py",
+      "line": 28,
+      "message": "Module-level `REQUEST_COUNTS` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.create_job",
+      "file": "app/main.py",
+      "line": 41,
+      "message": "Blocking call on an async path (blocking db `cursor = DB.execute(\"insert into jobs (name, status) values (?, ?)\", (name, \"queued\"))`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.create_job",
+      "file": "app/main.py",
+      "line": 42,
+      "message": "Blocking call on an async path (blocking db `DB.commit()`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "unbounded-module-container",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.create_job",
+      "file": "app/main.py",
+      "line": 45,
+      "message": "Module-level `WORK_QUEUE` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "fire-and-forget-task",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.create_job",
+      "file": "app/main.py",
+      "line": 46,
+      "message": "A spawned task whose handle is dropped. Nothing waits for it, so its errors and panics vanish, shutdown does not wait for it, and (Python) it can be garbage collected mid-run.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.process_job",
+      "file": "app/main.py",
+      "line": 53,
+      "message": "Blocking call on an async path (blocking db `DB.execute(\"update jobs set status = ? where id = ?\", (\"done\", job_id))`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": [
+        "app.create_job"
+      ]
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.process_job",
+      "file": "app/main.py",
+      "line": 54,
+      "message": "Blocking call on an async path (blocking db `DB.commit()`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": [
+        "app.create_job"
+      ]
+    },
+    {
+      "rule": "unbounded-module-container",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.process_job",
+      "file": "app/main.py",
+      "line": 55,
+      "message": "Module-level `EVENTS` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.get_job",
+      "file": "app/main.py",
+      "line": 61,
+      "message": "Blocking call on an async path (blocking db `row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.get_job",
+      "file": "app/main.py",
+      "line": 67,
+      "message": "Blocking call on an async path (blocking db `row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "io-in-loop",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.get_job",
+      "file": "app/main.py",
+      "line": 67,
+      "message": "db I/O inside a loop (blocking db `row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()`). Cost grows with collection size (N+1 pattern); batch, cache or bound concurrency.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "client-per-call",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.fetch_remote",
+      "file": "app/main.py",
+      "line": 78,
+      "message": "An HTTP client/session is constructed inside this function. If this function runs per request (or per loop iteration), it opens a brand-new connection pool every time instead of reusing one: slower (a new TCP/TLS handshake each call), and under load it can exhaust sockets. Build the client once (module scope, or app startup) and reuse it.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "unsanitized-url-query",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.fetch_remote",
+      "file": "app/main.py",
+      "line": 79,
+      "message": "A value is spliced directly into a URL's query string (string concat or an f-string/template literal) instead of going through `params=`/a query builder. A `&`, `#`, `%` or newline in the value changes the request's meaning (an extra parameter, a truncated path, header or log injection) and anything the server doesn't expect breaks the request. Pass it as `params=` (requests/httpx) or a URL-encoding helper so it is percent-encoded.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "unchecked-response",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.fetch_remote",
+      "file": "app/main.py",
+      "line": 80,
+      "message": "`response` is read here with no status check (`raise_for_status()` / `.status_code` / `.ok`) between the request and this use. An error response (4xx/5xx, or a non-JSON body) is parsed or cached as if it were a success, and the failure surfaces later, far from its cause. Check the status before using the body.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "unbounded-module-container",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.fetch_remote",
+      "file": "app/main.py",
+      "line": 81,
+      "message": "Module-level `CACHE` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+      "chain": [],
+      "reached_from": []
+    },
+    {
+      "rule": "hang-reaches-entry",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.run_batch",
+      "file": "app/main.py",
+      "line": 86,
+      "message": "`app.run_batch` can wait forever: app.run_batch \u2192 future @ app/main.py:89 (no timeout). No timeout or deadline bounds this path, so one unresponsive peer freezes this entry point.",
+      "chain": [
+        "app.run_batch",
+        "future @ app/main.py:89 (no timeout)"
+      ],
+      "reached_from": []
+    }
+  ],
+  "boundaries": [
+    {
+      "function": "app.health",
+      "lang": "python",
+      "location": "app/main.py:34",
+      "kind": "sleep",
+      "category": "sleep",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": null,
+      "loop_depth": 0,
+      "confidence": "exact",
+      "timeout_s": null,
+      "snippet": "time.sleep(0.05)"
+    },
+    {
+      "function": "app.create_job",
+      "lang": "python",
+      "location": "app/main.py:41",
+      "kind": "db",
+      "category": "db",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": "5s (sqlite3 busy timeout default)",
+      "loop_depth": 0,
+      "confidence": "heuristic",
+      "timeout_s": null,
+      "snippet": "cursor = DB.execute(\"insert into jobs (name, status) values (?, ?)\", (name, \"queued\"))"
+    },
+    {
+      "function": "app.create_job",
+      "lang": "python",
+      "location": "app/main.py:42",
+      "kind": "db",
+      "category": "db",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": "5s (sqlite3 busy timeout default)",
+      "loop_depth": 0,
+      "confidence": "heuristic",
+      "timeout_s": null,
+      "snippet": "DB.commit()"
+    },
+    {
+      "function": "app.process_job",
+      "lang": "python",
+      "location": "app/main.py:52",
+      "kind": "sleep",
+      "category": "sleep",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": null,
+      "loop_depth": 0,
+      "confidence": "exact",
+      "timeout_s": null,
+      "snippet": "time.sleep(0.2)"
+    },
+    {
+      "function": "app.process_job",
+      "lang": "python",
+      "location": "app/main.py:53",
+      "kind": "db",
+      "category": "db",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": "5s (sqlite3 busy timeout default)",
+      "loop_depth": 0,
+      "confidence": "heuristic",
+      "timeout_s": null,
+      "snippet": "DB.execute(\"update jobs set status = ? where id = ?\", (\"done\", job_id))"
+    },
+    {
+      "function": "app.process_job",
+      "lang": "python",
+      "location": "app/main.py:54",
+      "kind": "db",
+      "category": "db",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": "5s (sqlite3 busy timeout default)",
+      "loop_depth": 0,
+      "confidence": "heuristic",
+      "timeout_s": null,
+      "snippet": "DB.commit()"
+    },
+    {
+      "function": "app.get_job",
+      "lang": "python",
+      "location": "app/main.py:61",
+      "kind": "db",
+      "category": "db",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": "5s (sqlite3 busy timeout default)",
+      "loop_depth": 0,
+      "confidence": "heuristic",
+      "timeout_s": null,
+      "snippet": "row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()"
+    },
+    {
+      "function": "app.get_job",
+      "lang": "python",
+      "location": "app/main.py:67",
+      "kind": "db",
+      "category": "db",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": "5s (sqlite3 busy timeout default)",
+      "loop_depth": 1,
+      "confidence": "heuristic",
+      "timeout_s": null,
+      "snippet": "row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()"
+    },
+    {
+      "function": "app.fetch_remote",
+      "lang": "python",
+      "location": "app/main.py:79",
+      "kind": "http",
+      "category": "net",
+      "blocking": false,
+      "context": "async",
+      "has_timeout": true,
+      "default_timeout": "5s (httpx default)",
+      "loop_depth": 0,
+      "confidence": "heuristic",
+      "timeout_s": 10.0,
+      "snippet": "response = await client.get(f\"https://example.com/?key={key}\", timeout=10)"
+    },
+    {
+      "function": "app.run_batch",
+      "lang": "python",
+      "location": "app/main.py:89",
+      "kind": "future",
+      "category": "wait",
+      "blocking": true,
+      "context": "async",
+      "has_timeout": false,
+      "default_timeout": null,
+      "loop_depth": 1,
+      "confidence": "heuristic",
+      "timeout_s": null,
+      "snippet": "results = [future.result() for future in futures]"
+    }
+  ],
+  "effects": {
+    "entries": [
+      {
+        "function": "app.health",
+        "location": "app/main.py:32",
+        "max_wait": "50 ms",
+        "max_wait_s": 0.05,
+        "path": [
+          "sleep @ app/main.py:34 (sleep 50 ms)"
+        ],
+        "formula": "sleep 50 ms",
+        "max_attempts_per_request": 0
+      },
+      {
+        "function": "app.create_job",
+        "location": "app/main.py:39",
+        "max_wait": "5 s",
+        "max_wait_s": 5.0,
+        "path": [
+          "db @ app/main.py:41 (library default 5 s)"
+        ],
+        "formula": "library default 5 s",
+        "max_attempts_per_request": 1
+      },
+      {
+        "function": "app.get_job",
+        "location": "app/main.py:59",
+        "max_wait": "5 s",
+        "max_wait_s": 5.0,
+        "path": [
+          "db @ app/main.py:61 (library default 5 s)"
+        ],
+        "formula": "library default 5 s",
+        "max_attempts_per_request": 1
+      },
+      {
+        "function": "app.fetch_remote",
+        "location": "app/main.py:72",
+        "max_wait": "10 s",
+        "max_wait_s": 10.0,
+        "path": [
+          "http @ app/main.py:79 (timeout 10 s)"
+        ],
+        "formula": "timeout 10 s",
+        "max_attempts_per_request": 1
+      },
+      {
+        "function": "app.run_batch",
+        "location": "app/main.py:86",
+        "max_wait": "unbounded",
+        "max_wait_s": null,
+        "path": [
+          "future @ app/main.py:89 (no timeout)"
+        ],
+        "formula": "no timeout",
+        "max_attempts_per_request": 0
+      },
+      {
+        "function": "app.stats",
+        "location": "app/main.py:94",
+        "max_wait": "none",
+        "max_wait_s": 0.0,
+        "path": [],
+        "formula": "",
+        "max_attempts_per_request": 0
+      }
+    ],
+    "deadlines": [],
+    "retries": []
+  },
+  "hotspots": [
+    {
+      "function": "app.process_job",
+      "lang": "python",
+      "location": "app/main.py:50",
+      "score": 14.5,
+      "loop_nesting": 0,
+      "fan_in": 1,
+      "is_async": true
+    },
+    {
+      "function": "app.fetch_remote",
+      "lang": "python",
+      "location": "app/main.py:72",
+      "score": 14.0,
+      "loop_nesting": 0,
+      "fan_in": 0,
+      "is_async": true
+    },
+    {
+      "function": "app.get_job",
+      "lang": "python",
+      "location": "app/main.py:59",
+      "score": 13.0,
+      "loop_nesting": 1,
+      "fan_in": 0,
+      "is_async": true
+    },
+    {
+      "function": "app.create_job",
+      "lang": "python",
+      "location": "app/main.py:39",
+      "score": 10.0,
+      "loop_nesting": 0,
+      "fan_in": 0,
+      "is_async": true
+    },
+    {
+      "function": "app.run_batch",
+      "lang": "python",
+      "location": "app/main.py:86",
+      "score": 8.0,
+      "loop_nesting": 1,
+      "fan_in": 0,
+      "is_async": true
+    },
+    {
+      "function": "app.health",
+      "lang": "python",
+      "location": "app/main.py:32",
+      "score": 6.0,
+      "loop_nesting": 0,
+      "fan_in": 0,
+      "is_async": true
+    },
+    {
+      "function": "app.record_request",
+      "lang": "python",
+      "location": "app/main.py:27",
+      "score": 5.0,
+      "loop_nesting": 0,
+      "fan_in": 6,
+      "is_async": false
+    }
+  ],
+  "functions": [
+    {
+      "id": "app/main.py:27:0",
+      "lang": "python",
+      "qualname": "app.record_request",
+      "is_async": false,
+      "is_entry": false,
+      "lines": [
+        27,
+        28
+      ],
+      "max_loop_depth": 0
+    },
+    {
+      "id": "app/main.py:32:0",
+      "lang": "python",
+      "qualname": "app.health",
+      "is_async": true,
+      "is_entry": true,
+      "lines": [
+        32,
+        35
+      ],
+      "max_loop_depth": 0
+    },
+    {
+      "id": "app/main.py:39:0",
+      "lang": "python",
+      "qualname": "app.create_job",
+      "is_async": true,
+      "is_entry": true,
+      "lines": [
+        39,
+        47
+      ],
+      "max_loop_depth": 0
+    },
+    {
+      "id": "app/main.py:50:0",
+      "lang": "python",
+      "qualname": "app.process_job",
+      "is_async": true,
+      "is_entry": false,
+      "lines": [
+        50,
+        55
+      ],
+      "max_loop_depth": 0
+    },
+    {
+      "id": "app/main.py:59:0",
+      "lang": "python",
+      "qualname": "app.get_job",
+      "is_async": true,
+      "is_entry": true,
+      "lines": [
+        59,
+        68
+      ],
+      "max_loop_depth": 1
+    },
+    {
+      "id": "app/main.py:72:0",
+      "lang": "python",
+      "qualname": "app.fetch_remote",
+      "is_async": true,
+      "is_entry": true,
+      "lines": [
+        72,
+        82
+      ],
+      "max_loop_depth": 0
+    },
+    {
+      "id": "app/main.py:86:0",
+      "lang": "python",
+      "qualname": "app.run_batch",
+      "is_async": true,
+      "is_entry": true,
+      "lines": [
+        86,
+        90
+      ],
+      "max_loop_depth": 1
+    },
+    {
+      "id": "app/main.py:94:0",
+      "lang": "python",
+      "qualname": "app.stats",
+      "is_async": true,
+      "is_entry": true,
+      "lines": [
+        94,
+        101
+      ],
+      "max_loop_depth": 0
+    }
+  ],
+  "edges": [
+    {
+      "caller": "app.health",
+      "callee": "app.record_request",
+      "caller_id": "app/main.py:32:0",
+      "callee_id": "app/main.py:27:0",
+      "line": 33,
+      "awaited": false,
+      "context": "async",
+      "loop_depth": 0,
+      "confidence": "exact",
+      "deadline_s": null
+    },
+    {
+      "caller": "app.create_job",
+      "callee": "app.record_request",
+      "caller_id": "app/main.py:39:0",
+      "callee_id": "app/main.py:27:0",
+      "line": 40,
+      "awaited": false,
+      "context": "async",
+      "loop_depth": 0,
+      "confidence": "exact",
+      "deadline_s": null
+    },
+    {
+      "caller": "app.create_job",
+      "callee": "app.process_job",
+      "caller_id": "app/main.py:39:0",
+      "callee_id": "app/main.py:50:0",
+      "line": 46,
+      "awaited": false,
+      "context": "async",
+      "loop_depth": 0,
+      "confidence": "exact",
+      "deadline_s": null
+    },
+    {
+      "caller": "app.get_job",
+      "callee": "app.record_request",
+      "caller_id": "app/main.py:59:0",
+      "callee_id": "app/main.py:27:0",
+      "line": 60,
+      "awaited": false,
+      "context": "async",
+      "loop_depth": 0,
+      "confidence": "exact",
+      "deadline_s": null
+    },
+    {
+      "caller": "app.fetch_remote",
+      "callee": "app.record_request",
+      "caller_id": "app/main.py:72:0",
+      "callee_id": "app/main.py:27:0",
+      "line": 73,
+      "awaited": false,
+      "context": "async",
+      "loop_depth": 0,
+      "confidence": "exact",
+      "deadline_s": null
+    },
+    {
+      "caller": "app.run_batch",
+      "callee": "app.record_request",
+      "caller_id": "app/main.py:86:0",
+      "callee_id": "app/main.py:27:0",
+      "line": 87,
+      "awaited": false,
+      "context": "async",
+      "loop_depth": 0,
+      "confidence": "exact",
+      "deadline_s": null
+    },
+    {
+      "caller": "app.stats",
+      "callee": "app.record_request",
+      "caller_id": "app/main.py:94:0",
+      "callee_id": "app/main.py:27:0",
+      "line": 95,
+      "awaited": false,
+      "context": "async",
+      "loop_depth": 0,
+      "confidence": "exact",
+      "deadline_s": null
+    }
+  ]
+}

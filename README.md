@@ -50,7 +50,8 @@ It produces:
 - linter evidence: SARIF results (clippy, ruff, golangci-lint, eslint,
   semgrep, ...) placed in the map function they fall in; a result that means
   the same as a map finding corroborates it, the rest are leads;
-- reproductions in any of the six languages: an investigator subagent writes a
+- reproductions in any of the six languages: a bounded batch of nearby
+  function investigations shares one investigator's setup. That agent writes a
   test per finding that triggers the predicted effect under controlled
   conditions (injected latency, dead peer, simulated outage, scaling inputs),
   runs it, and reports a verdict with numbers:
@@ -120,12 +121,48 @@ claude --plugin-dir plugins/argus
 #   /argus:audit-trace path/to/repo -- <command>        runtime evidence
 #   /argus:audit-investigate path/to/repo               one round of reproductions via the argus:investigator agent
 #   MCP tools (any client, see plugins/argus/.mcp.json):
-#     audit_map, audit_trace, audit_trace_import, audit_lint_import, run_repro, audit_queue, audit_record, audit_report
+#     audit_status, audit_map, audit_trace, audit_trace_import, audit_lint_import, run_repro, audit_queue, audit_record, audit_report
 
 # Install it through this marketplace (inside Claude Code)
 /plugin marketplace add <path or git URL of this repo>
 /plugin install argus@argus
 ```
+
+Argus uses **Git commit versions** for marketplace updates. Neither
+`plugins/argus/.claude-plugin/plugin.json` nor the marketplace entry sets a
+`version`: Claude Code otherwise treats every checkout with that string as the
+same cached plugin, even when its code has changed. This previously left installs
+stuck on `0.2.0`. See [Claude Code's version resolution](https://code.claude.com/docs/en/plugins/loading#how-claude-code-computes-the-version).
+Commit changes before testing marketplace updates; use `--plugin-dir` for
+uncommitted development work. A standalone directory without Git has no commit
+version, so use `--plugin-dir` for that copy too.
+
+After the fix reaches your marketplace's remote branch, update from a terminal:
+
+```sh
+claude plugin marketplace update argus
+claude plugin update argus@argus
+claude plugin list
+```
+
+For the maintainer's commit/PR/publish sequence, see [PUBLISHING.md](PUBLISHING.md).
+
+Start a new Claude Code session after updating so its skills and MCP server use
+the new copy. Existing sessions can keep using the code they already loaded.
+For a marketplace added from a local checkout, update that checkout first.
+There is no need to delete caches or uninstall a plugin used by other sessions.
+
+To check the actual code, run `python plugins/argus/scripts/auditor_cli.py doctor`
+in the intended checkout, then call the `audit_status` MCP tool in the audit
+session. Compare `plugin_sha256` values; paths may differ between a checkout and
+its installed copy. `loaded_plugin_sha256` captures the payload when that process
+started, while `restart_required` detects subsequent changes to its files.
+An old server without `audit_status` needs an update and a new session. The doctor
+command works without third-party dependencies and does not install packages.
+Map and final report JSON also record the plugin identity; the final report
+preserves both the mapper's identity and its own, so mixed copies remain visible.
+These hashes identify file bytes, not an attestation of every module in memory;
+restart after any update rather than editing files under a running server.
 
 Layout of `plugins/argus/scripts/auditor/`:
 
@@ -135,6 +172,8 @@ Layout of `plugins/argus/scripts/auditor/`:
 | `langs/*.py` | One spec per language: node types, async rules, I/O rules, hooks |
 | `langs/patterns.py` | Source-pattern rules shared by every language (one hook, one table of regexes per rule) |
 | `analysis.py` | Call resolution, I/O classification, passing effects between functions, findings |
+| `identity.py` | Plugin payload hashes and process identity, shared by CLI diagnostics, MCP status, maps and reports |
+| `investigations.py` | Bounded batches and compact, language/rule-specific investigator context; budget stays per function item |
 | `effects.py` | Worst-case waits, deadlines, retry multipliers and crash-on-error, propagated across the call graph |
 | `timeouts.py` | Durations out of source text: timeout arguments, deadline wrappers, sleeps, library defaults |
 | `scip.py` | Precise call resolution from SCIP indexes (no protobuf dependency), plus the indexer runner |
@@ -159,7 +198,7 @@ Layout of `plugins/argus/scripts/auditor/`:
 | `orchestrate.py` | The round loop: ranked, budgeted queue with follow-ups and suppression; verdict ledger checked against repro results; final report data |
 | `report_html.py` | `report.json`, `report.md` and a self-contained, theme-aware `report.html` (publishable as a claude.ai artifact) |
 | `../hooks/guard.py` | PreToolUse guard: blocks live exchange hosts, credentials and destructive commands in audit runs and reproduction files |
-| `../mcp_server.py` | MCP server exposing `audit_map`, `audit_trace`, `audit_trace_import`, `audit_lint_import`, `run_repro`, `audit_queue`, `audit_record`, `audit_report` over stdio |
+| `../mcp_server.py` | MCP server exposing `audit_status`, `audit_map`, `audit_trace`, `audit_trace_import`, `audit_lint_import`, `run_repro`, `audit_queue`, `audit_record`, `audit_report` over stdio |
 | `../scripts/bootstrap.py` | Builds a private virtualenv and re-execs the CLI or MCP server under it if the launching `python3` lacks Argus's dependencies |
 | `../scripts/ci_helpers.py` | The two small helpers `action.yml` calls (step outputs, severity gate), kept as real scripts rather than inline YAML |
 

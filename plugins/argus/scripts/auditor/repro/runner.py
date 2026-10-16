@@ -166,6 +166,13 @@ def parse_junit(path: Path, file_name: str | None = None) -> list[dict]:
 
 def run_file(repo: Path, f: Path, timeout: int, python: str) -> dict:
     """One reproduction file in its own pytest process: {file, exit_code, output_tail, tests, ran_at}."""
+    from .scaffold import is_unfilled
+
+    if is_unfilled(f):
+        return {"file": f.name, "exit_code": 0, "output_tail": "", "ran_at": now(), "python": python,
+                "tests": [{"file": f.name, "test": f.stem, "outcome": "skipped", "time_s": 0.0,
+                           "message": "unfilled scaffold; no reproduction was executed",
+                           "evidence": [], "finding": None}]}
     with tempfile.TemporaryDirectory(prefix="argus-junit-") as tmp:
         junit = Path(tmp) / "results.xml"
         rc, output = run_pytest(repo, [f], junit, timeout, python)
@@ -312,9 +319,17 @@ def status_of(d: dict | None, finding: str, repro_file: str | None = None) -> st
     if not tests and repro_file:
         name = Path(repro_file).name
         tests = [t for t in (d or {}).get("tests", []) if t.get("file") == name]
+        # A different finding's passing test in a shared file is never proof for this one.
+        if any(t.get("finding") for t in tests):
+            return "missing"
+        # File matching can explain a setup failure before evidence was emitted,
+        # but a bare passing test supplies no proof for a particular finding.
+        return "failed" if any(t["outcome"] in {"failed", "error"} for t in tests) else "missing"
     if not tests:
         return "missing"
-    return "passed" if any(t["outcome"] == "passed" for t in tests) else "failed"
+    if all(t["outcome"] == "skipped" for t in tests):
+        return "missing"
+    return "passed" if all(t["outcome"] == "passed" for t in tests) else "failed"
 
 
 def to_markdown(d: dict) -> str:

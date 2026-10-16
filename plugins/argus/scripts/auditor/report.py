@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import paths
 from .analysis import RepoMap
+from .identity import runtime_identity
 
 
 def to_json(m: RepoMap) -> dict:
@@ -18,6 +19,7 @@ def to_json(m: RepoMap) -> dict:
     return {
         "meta": {
             "tool": "argus/map",
+            "argus": runtime_identity(),
             "version": 2,
             "root": str(m.root),
             "path_warnings": paths.warnings(m.root),

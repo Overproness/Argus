@@ -1,6 +1,6 @@
 ---
 name: audit-investigate
-description: Verify audit findings by reproduction, one round, in any language. The deterministic queue ranks findings from .audit/map.json (and .audit/trace.json evidence when present); one investigator subagent per queued finding writes and runs a test that triggers the predicted effect under controlled conditions (latency injection, dead peer, simulated outage, scaling inputs). Python runs in-process; every other language runs against the fault server as a black-box program or a native probe. Each reports a verdict with numbers, recorded in the verdict ledger. Use after audit-map or audit-trace when the user wants findings proven, asks "is this real", or wants reproduction tests. For several rounds and a final report, use the `audit` skill.
+description: Reproduce one round of queued audit leads in any language. Nearby functions share a bounded investigator batch with separate measured verdicts. Use after audit-map or audit-trace to prove findings; use audit for multiple rounds and a final report.
 argument-hint: "[repo path] [--max N] [--rule blocking-in-async,...]"
 ---
 
@@ -40,16 +40,14 @@ launching investigators.
 
 ## 2. Run investigators
 
-For each item, launch the `argus:investigator` agent with a self-contained
-prompt containing:
-- the plugin root;
-- the item JSON, verbatim (it carries `repo`, `abs_file` and the function's
-  `source`);
-- one line: "The repo root is the `repo` field; copy it exactly, including any
-  spaces."
-
-Run at most 4 at a time. Each returns a JSON list, one verdict per finding in
-the item's `findings`.
+Use the queue's `batches`: launch one `argus:investigator` per batch, passing
+only its `context_file` path and the reproduction interpreter if prepared.
+The agent reads that JSON and the adjacent `.md` guide, which contains only
+the relevant language and rules. Do not send full maps, traces or the agent
+manual, or reread them for every function. The queue groups nearby functions
+within size caps; each item still consumes its own budget slot and needs its
+own verdicts. Run at most 4 batches concurrently. Each returns a flat JSON
+list covering every finding in its items; unfinished ones are inconclusive.
 
 ## 3. Aggregate and record
 

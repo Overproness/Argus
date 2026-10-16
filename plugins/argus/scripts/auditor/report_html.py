@@ -27,7 +27,9 @@ def to_markdown(d: dict) -> str:
     out.append(f"_Generated {m['generated_at']} · languages: "
                + ", ".join(f"{k} ({v})" for k, v in m.get("languages", {}).items())
                + f" · trace: {'yes' if m['trace'] else 'no'} · reproductions: {'yes' if m['repro'] else 'no'} · "
-               f"{m['investigated']} investigated over {m['rounds']} round(s)"
+               f"{m['investigated']} function investigations issued over {m['rounds']} round(s)"
+               + (f" · {m['investigator_batches']} investigator batches · {m['verdicts']} finding verdicts"
+                  if "investigator_batches" in m else "")
                + (f" · stopped: {m['stop']}" if m.get("stop") else "") + "_\n")
     out.append("| Status | Count | Meaning |")
     out.append("|---|---|---|")

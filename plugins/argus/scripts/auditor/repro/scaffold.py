@@ -5,12 +5,14 @@ Most of an investigation's tokens go to setup that is the same for every finding
 harness helper, which imports, the shape of the assertion), not to the one fact specific to this finding
 (the hypothesis: what exactly triggers it, here). `queue` writes one of these to `.audit/repros/` for every
 queued item; the investigator's job narrows to filling in the `# TODO` lines, not building the test from a
-blank file. A skeleton left unfilled fails loudly (an explicit `pytest.fail`), so it can never be mistaken
-for a passing reproduction.
+blank file. Exact unfilled starters are tracked and skipped without execution;
+an explicit failure also prevents a copied generic starter from passing as proof.
 """
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 
 HEADER = '''"""Reproduction for {rule}@{function}:{line}.
 
@@ -260,8 +262,8 @@ async def _noop():  # TODO: replace with `await {fname}(...)`
 GENERIC = (
     "from auditor.repro.harness import evidence",
     '''def test_{fn}():
-    # TODO: no ready-made template for "{rule_raw}". Read the rule's row in agents/investigator.md's
-    # table (section 3a/3b) for the matching helper, or build the smallest test that triggers the effect.
+    # TODO: no ready-made template for "{rule_raw}". Read the generated batch guide, or the relevant
+    # row in skills/audit-investigate/references/reproduction-guide.md, for the matching helper.
     pass
 ''')
 
@@ -276,7 +278,7 @@ def generate(item: dict) -> str:
     header = HEADER.format(rule=f["rule"], function=item["function"], line=f.get("line", item.get("line", "?")),
                            message=f.get("message", ""))
     rendered = body.format(fn=fn, fname=fname, fid=f["id"], rule_raw=f["rule"])
-    return header + "\n" + imports + "\n\n\n" + rendered
+    return header + "\n" + imports + "\n\n\n" + rendered + FOOTER
 
 
 def write(item: dict, repro_dir) -> "Path":
@@ -288,4 +290,17 @@ def write(item: dict, repro_dir) -> "Path":
     path = repro_dir / f"test_{_test_name(item['function'])}.py"
     if not path.exists():
         path.write_text(generate(item), encoding="utf8")
+        registry = repro_dir / ".scaffolds.json"
+        hashes = json.loads(registry.read_text(encoding="utf8")) if registry.exists() else {}
+        hashes[path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        registry.write_text(json.dumps(hashes, indent=2), encoding="utf8")
     return path
+
+
+def is_unfilled(path) -> bool:
+    """Only exact, untouched generated starters are skipped; edited tests always run."""
+    registry = path.parent / ".scaffolds.json"
+    if not registry.exists():
+        return False
+    hashes = json.loads(registry.read_text(encoding="utf8"))
+    return hashes.get(path.name) == hashlib.sha256(path.read_bytes()).hexdigest()

@@ -52,7 +52,7 @@ which also cover JS/TS/Java/Go.
 | `sql-injection` | Python, JS, TS, Java, Go | SQL text built by f-string/concat/`%`/`.format()` with a caller-influenced value. Excludes cases where only *structure* (placeholders, column names) is interpolated, not a value. |
 | `unbounded-query` | Python, JS, TS, Java, Rust | `SELECT` with no `WHERE`/`LIMIT`, `.fetchall()`, `.objects.all()` — excluding generic query helpers that just run whatever SQL their caller passed in. |
 | `float-money` | all | A money-shaped variable/field typed or assigned as a float/double. |
-| `wallclock-interval` | Python, JS, TS, Java, Rust | An interval computed by subtracting two wall-clock reads (`time.time()`, `Date.now()`) instead of a monotonic clock — including the two-step `now = time.time(); ... - now` form. |
+| `wallclock-interval` | Python, JS, TS, Java, Rust | An interval computed by subtracting wall-clock reads instead of a monotonic clock, including `now = time.time(); ... - now`. Python also catches locally generated relative expiries (`time.time() + ttl`) compared with that clock; persisted epoch timestamps require contextual review. |
 | `redos-regex` | all | A regex with a repeated group containing another repeat (catastrophic backtracking shape) — including ones defined as a module-level constant and used elsewhere. |
 | `panic-on-external-data` | Go, Rust | Parsing/decoding external input and unwrapping without checking the error. |
 | `unbounded-channel` | Python, Rust, Java, Go | An unbounded queue/channel: a fast producer grows memory without limit. |
@@ -69,6 +69,8 @@ which also cover JS/TS/Java/Go.
 | `mutate-while-iterating` | A collection is mutated (append/remove/pop/etc.) while a `for` loop iterates over it directly (not a copy). | `for o in orders: orders.remove(o)` |
 | `unbounded-threads` | A new OS thread started per call, never joined, no pool/cap. | `Thread(target=...).start()` with no `.join()` and no pool |
 | `unbounded-concurrency` | `asyncio.gather(*[...])` over a caller-controlled list with no semaphore/cap. | `await asyncio.gather(*[work(i) for i in items])` |
+| `unbounded-background-tasks` | A known FastAPI request route starts a bare detached asyncio task. Request completion releases server slots while background work can accumulate; external admission controls still need review. | `@app.post(...)` handler calls `asyncio.create_task(work())` and returns |
+| `buffered-response-slice` | A known HTTPX/requests response is fully materialized before a text/content slice. The returned prefix does not bound downloaded bytes or memory. Streaming and upstream size guarantees require contextual review. | `response = await client.get(...); return response.text[:100]` |
 | `uncommitted-write` | An `INSERT`/`UPDATE`/`DELETE` executed on a connection that's never committed (and isn't in autocommit mode or a `with conn:` block). | `conn.execute("INSERT ..."); return` (no `.commit()`) |
 | Python `file` boundary | Sync `open()`/`os.*`/`shutil.*`/`Path.read_text()` etc. now classified as blocking I/O, so they feed `blocking-in-async` when called from `async def`. | sync file read inside an async handler |
 | sqlite3 default timeout | sqlite3 calls are no longer flagged as "waits forever" — they're bounded by the 5s `busy_timeout` default, which cut a false-positive category. | — |
@@ -89,9 +91,11 @@ the way it used to be. Still blind to env vars and runtime config objects.
 
 - `repro-env` builds a venv with the target repo's own dependencies so tests
   import the real app, not a stub.
-- `queue` groups findings by function (one investigator per function, up to
-  5 findings riding along, low-severity ones free), ranked by severity ×
-  confidence × trace evidence × hotspot score.
+- `queue` groups up to 8 findings per function, with low-severity ones riding
+  along, ranked by severity × confidence × trace evidence × hotspot score.
+  Nearby functions share a bounded investigator batch (same file/language,
+  at most 6 items, 24 findings and 12k source characters). Budget is per
+  function item, not per batch. Only matching language/rule guidance is loaded.
 - Each reproduction file runs in its **own process**, state is restored
   between tests in a file (`isolation.py`), and results are merged under a
   lock so parallel investigators can't clobber each other's output.
@@ -101,6 +105,9 @@ the way it used to be. Still blind to env vars and runtime config objects.
 - A "confirmed" verdict is downgraded to inconclusive automatically if its own
   reproduction doesn't pass on a cold rerun. Tooling-caused inconclusives
   (wrong tree, a broken repro run) are retried once automatically.
+- Unchanged generated scaffolds are skipped, not counted as experiments.
+  A passing test must emit the exact finding ID; another test in its file
+  cannot prove it. Reports recheck saved confirmations against the latest run.
 - Default budget: 15 investigations total, 6 per round, 3 rounds.
 
 **Validated result (2026-09-25 run on the 16-bug FastAPI fixture,

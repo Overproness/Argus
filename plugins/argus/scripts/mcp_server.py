@@ -13,6 +13,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bootstrap  # noqa: E402
+from auditor.identity import runtime_identity  # noqa: E402
 
 bootstrap.ensure_dependencies()  # a plain `python3` may lack tree-sitter and mcp: use (or build) a private venv
 
@@ -23,6 +24,16 @@ server = MCPServer(
     instructions="Static audit map, runtime tracing and reproduction runner for a repository. "
     "Run audit_map first; audit_trace and run_repro read its .audit/map.json.",
 )
+
+
+@server.tool()
+def audit_status() -> dict:
+    """Identify this running MCP server's plugin path and payload hashes.
+
+    Compare with `auditor_cli.py doctor` from the intended checkout. If
+    restart_required is true, restart the server before auditing. No repo needed.
+    """
+    return runtime_identity()
 
 
 def _out(repo: Path, out: str | None) -> Path:
@@ -236,8 +247,8 @@ def audit_queue(repo: str, budget: int | None = None, per_round: int | None = No
                 out: str | None = None) -> dict:
     """Open the next investigation round: ranked, budgeted findings to reproduce (.audit/queue.json).
 
-    Returns `stop` (why no round was opened) or `items` to hand to investigators, plus skipped findings
-    with reasons. Budget flags are remembered in .audit/verdicts.json after the first call.
+    Returns `stop` or `items` plus bounded `batches`; hand each batch's context_file to one investigator.
+    Budget remains per function item. Skipped findings include reasons; budget flags persist in the ledger.
     """
     from auditor import orchestrate
 

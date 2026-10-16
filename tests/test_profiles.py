@@ -106,6 +106,48 @@ def test_cpuprofile_clock_startup_and_heartbeat_merge(tmp_path):
     assert by_name["(program-level: no span covered the gap)"].at == epoch0 + 3.0  # the gap crunch explains is gone
 
 
+@pytest.mark.parametrize("count, idle_gap, expected, foreign_coverage", [
+    (1, False, 1, "same"), (2, False, 2, "same"), (None, False, 2, "same"),
+    (1, True, 2, "same"), (1, False, 2, "run"), (1, False, 2, "process"),
+    (1, False, 2, "import"),
+])
+def test_coverage_joins_single_call_fragments_but_preserves_distinct_stalls(
+        tmp_path, count, idle_gap, expected, foreign_coverage):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    source = "function crunch(ms) { return ms; }\n"
+    target = repo / "m.js"
+    target.write_text(source)
+    url = target.as_uri()
+    crunch = ("crunch", url, 0, 0)
+    callback = ("", url, 1, 0)
+    idle = ("(idle)", "", -1, -1)
+    # A 20ms missing frame splits one 600ms busy call under the old 5ms gap
+    # rule. This models optimization/sampling loss without depending on a CI scheduler.
+    gap = [[idle]] * 20 if idle_gap else [[callback]] * 20
+    doc = cpuprofile([[idle]] * 3 + [[callback, crunch]] * 200 + gap
+                     + [[callback, crunch]] * 380 + [[idle]] * 3)
+    prof = tmp_path / ("trace/profiles" if foreign_coverage == "import" else "trace/node-prof/run-1")
+    prof.mkdir(parents=True)
+    (prof / "CPU.20260101.000000.123.0.001.cpuprofile").write_text(json.dumps(doc))
+    if count is not None:
+        cov = tmp_path / "trace/node-cov" / ("other-run" if foreign_coverage == "run" else "run-1")
+        cov.mkdir(parents=True)
+        cov_pid = "999" if foreign_coverage == "process" else "123"
+        (cov / f"coverage-{cov_pid}-1000-0.json").write_text(json.dumps({"result": [{"url": url, "functions": [{
+            "functionName": "crunch", "ranges": [{"startOffset": 0, "endOffset": len(source), "count": count}]
+        }]}]}))
+    fmap = {"functions": [{"id": "m.js:1:0", "qualname": "m.crunch", "lang": "javascript", "lines": [1, 1]}],
+            "findings": []}
+    trace = profiles.attach(Trace([], [], []), tmp_path / "trace", fmap, repo, 0.1)
+    assert len(trace.stalls) == expected
+    assert all(s.qualname == "m.crunch" for s in trace.stalls)
+    if expected == 1:
+        assert trace.stalls[0].dur == pytest.approx(0.6)
+    else:
+        assert max(s.dur for s in trace.stalls) == pytest.approx(0.38)
+
+
 def test_cli_trace_import_and_rebuild(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

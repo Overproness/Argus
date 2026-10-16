@@ -41,6 +41,14 @@ def score(audit_dir: Path, tokens_total: float | None, investigators: int | None
     if led is None:
         raise FileNotFoundError(f"{audit_dir / 'verdicts.json'} missing; run `queue`/`record` first")
     verdicts = led.get("verdicts", {})
+    repro = _load(audit_dir / "repro.json")
+    if repro is not None:
+        sys.path.insert(0, str(ROOT / "plugins/argus/scripts"))
+        from auditor.repro.runner import status_of
+
+        verdicts = {fid: ({**v, "verdict": "inconclusive"} if v.get("verdict") == "confirmed"
+                         and status_of(repro, v.get("via") or fid, v.get("repro_file")) != "passed" else v)
+                    for fid, v in verdicts.items()}
     by_verdict: dict[str, list[str]] = {"confirmed": [], "rejected": [], "inconclusive": []}
     for fid, v in verdicts.items():
         by_verdict.setdefault(v.get("verdict", "?"), []).append(fid)
@@ -52,7 +60,9 @@ def score(audit_dir: Path, tokens_total: float | None, investigators: int | None
         investigators = len(per_item_tokens)
 
     rounds = led.get("rounds", [])
-    n_investigations = investigators if investigators is not None else sum(len(r["items"]) for r in rounds)
+    functions = sum(len(r["items"]) for r in rounds)
+    n_investigations = (investigators if investigators is not None
+                        else sum(len(r.get("batches", r["items"])) for r in rounds))
     n_proven = len(by_verdict["confirmed"])
 
     out = {
@@ -60,9 +70,12 @@ def score(audit_dir: Path, tokens_total: float | None, investigators: int | None
         "budget": led.get("budget"),
         "by_verdict": {k: len(v) for k, v in by_verdict.items()},
         "investigations": n_investigations,
+        "investigator_runs": n_investigations,
+        "function_investigations_issued": functions,
         "proven": n_proven,
         "tokens_total": tokens_total,
         "tokens_per_investigation": (tokens_total / n_investigations) if tokens_total and n_investigations else None,
+        "tokens_per_function_investigation": (tokens_total / functions) if tokens_total and functions else None,
         "tokens_per_proven_finding": (tokens_total / n_proven) if tokens_total and n_proven else None,
     }
 
@@ -114,6 +127,8 @@ def main() -> int:
         return 2
 
     print(f"investigations: {result['investigations']}  budget: {result['budget']}")
+    print(f"investigator runs: {result['investigator_runs']}  "
+          f"function investigations issued: {result['function_investigations_issued']}")
     print(f"by verdict: {result['by_verdict']}")
     if result["tokens_total"]:
         print(f"tokens: {result['tokens_total']:.0f} total, "

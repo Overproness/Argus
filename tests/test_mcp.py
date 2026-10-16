@@ -23,7 +23,16 @@ def test_tools_registered(srv):
     import asyncio
     names = {t.name for t in asyncio.run(srv.server.list_tools())}
     assert names == {"audit_map", "audit_trace", "audit_trace_import", "audit_lint_import", "run_repro", "audit_repro_env", "audit_queue", "audit_record",
-                     "audit_report"}
+                     "audit_report", "audit_status"}
+
+
+def test_status_identifies_the_running_server(srv):
+    from auditor.identity import runtime_identity
+
+    status = srv.audit_status()
+    assert status == runtime_identity()
+    assert status["plugin_root"] == str(ROOT / "plugins" / "argus")
+    assert not status["restart_required"]
 
 
 def test_trace_import_over_mcp(srv, tmp_path):

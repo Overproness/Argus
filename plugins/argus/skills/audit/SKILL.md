@@ -17,9 +17,10 @@ two directories above this skill's base directory, or `${CLAUDE_PLUGIN_ROOT}`.
 
 ## 0. Budget
 
-Parse the arguments. The defaults are `--budget 15` investigations in total,
-`--per-round 6`, and `--max-rounds 3`. Each investigation is one subagent run
-covering one function and all of its findings (up to 5), so tell the user the
+Parse the arguments. The defaults are `--budget 15` function investigations,
+`--per-round 6`, and `--max-rounds 3`. Each budget slot covers one function
+and up to 8 findings. Nearby functions share one subagent batch; the number
+of subagents does not change the budget charged. Tell the user the
 budget before you start. The ledger in
 `.audit/verdicts.json` remembers the budget and progress, so an interrupted
 audit resumes where it stopped.
@@ -75,19 +76,17 @@ Repeat:
 1. `queue "<repo>" --budget B --per-round K --max-rounds R`. Pass the flags on
    the first round only; later rounds reuse the stored budget. If the output
    starts with `stop:`, go to step 4.
-2. Read `.audit/queue.json`. For each entry in `items`, launch the
-   `argus:investigator` agent with a self-contained prompt containing:
-   - the plugin root;
-   - the item JSON, verbatim (it carries `repo`, `abs_file` and the function's
-     `source`, so the investigator can check it is reading the right tree);
-   - one line: "The repo root is the `repo` field; copy it exactly, including
-     any spaces."
-   - for Python, the interpreter reproductions run under (`<repo>/.audit/venv/bin/python`
-     after `repro-env`), so the investigator does not go looking for one.
-
-   Run at most 4 at a time. Each returns a JSON list with one verdict per
-   finding in the item's `findings`. Do not investigate anything that is not
-   in the queue.
+2. Use the `batches` in `.audit/queue.json` (the CLI also prints their context
+   paths). Launch **one** `argus:investigator` per batch, not per item.
+   Pass its `context_file` path and, for Python, the interpreter from
+   `repro-env`. Tell it to read that JSON and its adjacent `.md` guide.
+   The file already contains the exact repo paths, sources, findings and
+   plugin root. Do not paste the JSON, full map, trace or investigator manual
+   into each prompt; do not ask the agent to reread its own definition.
+   Run at most 4 batches concurrently. Each returns one flat list with a
+   separate verdict for every finding in all its items. Mark unfinished
+   findings inconclusive rather than silently dropping them. Never alter
+   selection or budget to make the batch larger.
 3. `repro "<repo>"` reruns every reproduction under `.audit/repros/`, each file
    in its own process.
 4. Concatenate this round's verdict lists into one JSON list in
@@ -110,9 +109,8 @@ Between rounds the queue does the following on its own:
   a proven effect gets traced up toward the entry points.
 - It suppresses findings whose chain uses a call edge an investigator rejected
   (`wrong_edge`).
-- It groups findings by function: one investigator settles all of a
-  function's findings, and low-severity findings in a queued function ride
-  along for free.
+- It groups findings by function, then batches nearby items for one
+  investigator. Low-severity findings in a queued function ride along for free.
 - It queues findings in every language. Each item's `harness` field tells the
   investigator how to reproduce it:
   - Python in-process;

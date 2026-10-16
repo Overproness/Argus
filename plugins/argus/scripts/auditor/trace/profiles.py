@@ -171,7 +171,8 @@ class FrameMapper:
 
 # --- samples -> activations and stalls ------------------------------------------------------------
 
-def _from_samples(tl: Timeline, fmap: FrameMapper, pid: int, threshold: float, calls: list, stalls: list):
+def _from_samples(tl: Timeline, fmap: FrameMapper, pid: int, threshold: float, calls: list, stalls: list,
+                  single_calls: set[tuple[str, int]] | None = None):
     open_runs: dict[tuple[str, int], list] = {}  # key -> [id, parent, start, dur, self, fn]
     seq = 0
     done = []
@@ -219,6 +220,21 @@ def _from_samples(tl: Timeline, fmap: FrameMapper, pid: int, threshold: float, c
                     open_at[k][1], open_at[k][3] = i, 0.0
                 else:
                     open_at[k] = [i, i, fn, 0.0]
+        # An optimized frame can disappear for longer than GAP_S without
+        # returning. Exact coverage can prove these fragments are one call.
+        # Only join inside this busy stretch: idle separates real loop stalls,
+        # even when a single async activation spans both of them.
+        joined = []
+        for segment in segs:
+            key, fn, first, last, dur = segment
+            prior = next((i for i, s in enumerate(joined) if s[0] == key), None)
+            if key in (single_calls or set()) and prior is not None:
+                first = joined[prior][2]
+                joined[prior] = (key, fn, first, last, sum(busy[j][1] for j in range(first, last + 1)))
+            else:
+                joined.append(segment)
+        segs = joined
+
         def below(t, s) -> bool:
             """t's function runs inside s's call: deeper on the stack wherever both are present."""
             for j in range(t[2], t[3] + 1):
@@ -436,6 +452,7 @@ def attach(trace: Trace, trace_dir: Path, map_data: dict, repo: Path, stall_s: f
         return trace
     mapper = Mapper(map_data, repo)
     fmap = FrameMapper(mapper)
+    exact_counts = coverage_counts(cov_files, mapper)
     runs, calls = list(trace.runs), list(trace.calls)
     new_stalls, on_epoch = [], []
     pid = PID_BASE
@@ -459,11 +476,18 @@ def attach(trace: Trace, trace_dir: Path, map_data: dict, repo: Path, stall_s: f
             timelines, evented = from_speedscope(doc)
             source, lang = "speedscope", "any"
         m = re.match(r"CPU\.\d+\.\d+\.(\d+)\.", f.name)  # Node names profiles CPU.<date>.<time>.<pid>.<tid>.<n>
+        # Counts from another process/run, or unpaired imports, cannot prove
+        # how many activations this particular sampled timeline contains.
+        single_calls = set()
+        if m and f.parent.parent == trace_dir / "node-prof":
+            run_cov = trace_dir / "node-cov" / f.parent.name
+            paired = coverage_counts(sorted(run_cov.glob(f"coverage-{m.group(1)}-*.json")), mapper)
+            single_calls = {(c.file, c.line) for c in paired if c.count == 1}
         label = (traced_cmd + [f"(process {m.group(1)})"]) if traced_cmd and m else [f.name]
         for tl in timelines:
             pid += 1
             got_calls, got_stalls = [], []
-            _from_samples(tl, fmap, pid, stall_s, got_calls, got_stalls)
+            _from_samples(tl, fmap, pid, stall_s, got_calls, got_stalls, single_calls)
             if not got_calls:
                 continue  # never ran repo code (npm itself, a helper process): its busy time is not the repo's
             calls += got_calls
@@ -484,5 +508,5 @@ def attach(trace: Trace, trace_dir: Path, map_data: dict, repo: Path, stall_s: f
     # profile's version, which names the function.
     stalls = [s for s in trace.stalls
               if s.file or not any(_overlap(s, p) >= 0.5 * min(s.dur, p.dur) for p in on_epoch)] + new_stalls
-    counts = list(trace.counts) + coverage_counts(cov_files, mapper)
+    counts = list(trace.counts) + exact_counts
     return Trace(runs, calls, stalls, list(trace.io), counts)

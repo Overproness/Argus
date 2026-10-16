@@ -1,0 +1,318 @@
+[
+ {
+  "finding": "race-across-await@app.fetch_remote:74",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "50 concurrent requests for the same cold key",
+   "constraints": "cache check before await, write after",
+   "expected_effect": "upstream calls > 1"
+  },
+  "repro_file": ".audit/repros/test_fetch_remote.py",
+  "evidence": {
+   "calls": 50,
+   "upstream_calls": 50,
+   "expected_upstream_calls": 1,
+   "cache_entries": 1
+  },
+  "extreme_case": "A burst of N requests for one uncached/expired key makes N upstream fetches instead of 1.",
+  "smallest_fix": "Per-key asyncio.Lock or shared in-flight future; re-check cache after acquiring.",
+  "reason": null,
+  "blocked_by": null,
+  "env_workaround": "httpx.MockTransport injected via AsyncClient transport=",
+  "wrong_edge": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "client-per-call@app.fetch_remote:78",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "20 sequential distinct-key calls",
+   "constraints": "only on cache miss",
+   "expected_effect": "AsyncClient built once per call"
+  },
+  "repro_file": ".audit/repros/test_fetch_remote.py",
+  "evidence": {
+   "clients_built": 20,
+   "calls": 20
+  },
+  "extreme_case": "Every miss opens a new connection pool and TLS handshake.",
+  "smallest_fix": "One module-level or lifespan-managed httpx.AsyncClient.",
+  "reason": null,
+  "blocked_by": null,
+  "env_workaround": "MockTransport injection",
+  "wrong_edge": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "unsanitized-url-query@app.fetch_remote:79",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "key='abc&evil=1'",
+   "constraints": "f-string URL, no encoding",
+   "expected_effect": "peer sees evil as separate param"
+  },
+  "repro_file": ".audit/repros/test_fetch_remote.py",
+  "evidence": {
+   "raw_url": "https://example.com/?key=abc&evil=1",
+   "params": {
+    "key": [
+     "abc"
+    ],
+    "evil": [
+     "1"
+    ]
+   }
+  },
+  "extreme_case": "Caller can inject extra upstream query parameters.",
+  "smallest_fix": "Pass params={'key': key} to client.get.",
+  "reason": null,
+  "blocked_by": null,
+  "env_workaround": "MockTransport injection",
+  "wrong_edge": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "unchecked-response@app.fetch_remote:80",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "upstream returns 500 with error body",
+   "constraints": "no status check",
+   "expected_effect": "error body returned and cached"
+  },
+  "repro_file": ".audit/repros/test_fetch_remote.py",
+  "evidence": {
+   "upstream_status": 500,
+   "first": {
+    "cached": false
+   },
+   "second": {
+    "cached": true
+   },
+   "upstream_calls": 1
+  },
+  "extreme_case": "Transient 5xx served as 200 and cached 60 s.",
+  "smallest_fix": "response.raise_for_status() and map to 502 before caching.",
+  "reason": null,
+  "blocked_by": null,
+  "env_workaround": "MockTransport injection",
+  "wrong_edge": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "unbounded-module-container@app.fetch_remote:81",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "500 distinct keys then a request 1 h later",
+   "constraints": "entries overwritten, never evicted",
+   "expected_effect": "len(CACHE)==distinct keys, expired held"
+  },
+  "repro_file": ".audit/repros/test_fetch_remote.py",
+  "evidence": {
+   "entries_after_n": 500,
+   "n": 500,
+   "entries_after_expiry": 501,
+   "expired_still_held": 500
+  },
+  "extreme_case": "Unique-key stream grows memory without bound.",
+  "smallest_fix": "Bounded TTL/LRU cache or evict expired + cap size.",
+  "reason": null,
+  "blocked_by": null,
+  "env_workaround": "MockTransport injection; time.time patched to age entries",
+  "wrong_edge": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "unbounded-wait-loop@app.get_job:65",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "GET a job whose row stays status='queued' forever",
+   "constraints": "no deadline or iteration cap; reachable from /jobs/{job_id}",
+   "expected_effect": "call does not return within 3 s deadline"
+  },
+  "repro_file": ".audit/repros/test_get_job.py",
+  "evidence": {
+   "returned": false,
+   "elapsed_s": 3.0021,
+   "deadline_s": 3
+  },
+  "extreme_case": "If process_job crashes or is never scheduled, every GET /jobs/{id} for that job hangs forever, polling the DB every 10 ms.",
+  "smallest_fix": "Add a max-wait deadline (time.monotonic()) and return 202/504 or the current status when exceeded.",
+  "reason": null,
+  "blocked_by": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "blocking-in-async@app.get_job:61",
+  "verdict": "rejected",
+  "hypothesis": {
+   "trigger": "call get_job repeatedly on a completed job and measure loop lag",
+   "constraints": "in-process sqlite3 :memory:",
+   "expected_effect": "loop lag >= 0.05 s"
+  },
+  "repro_file": ".audit/repros/test_get_job.py",
+  "evidence": {
+   "max_lag_s": 0.0,
+   "calls": 200
+  },
+  "extreme_case": "None: PK lookup on in-memory SQLite takes microseconds.",
+  "smallest_fix": null,
+  "reason": "In-memory SQLite PK lookup, not a slow peer; 200 calls produced max loop lag 0.0 s.",
+  "blocked_by": null,
+  "wrong_pattern": true
+ },
+ {
+  "finding": "io-in-loop@app.get_job:67",
+  "verdict": "rejected",
+  "hypothesis": {
+   "trigger": "job stays queued ~0.3 s then completes; count queries and distinct keys",
+   "constraints": "N+1 needs many distinct items",
+   "expected_effect": "more than one distinct parameter set"
+  },
+  "repro_file": ".audit/repros/test_get_job.py",
+  "evidence": {
+   "queries": 29,
+   "distinct_param_sets": 1
+  },
+  "extreme_case": "None beyond unbounded-wait-loop.",
+  "smallest_fix": null,
+  "reason": "Loop re-reads the same single row (1 distinct key over 29 queries); status poll, not N+1.",
+  "blocked_by": null,
+  "wrong_pattern": true
+ },
+ {
+  "finding": "blocking-in-async@app.run_batch:89",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "POST /batch with a large items list (n = 200,000)",
+   "constraints": "run_batch calls future.result() on the event-loop thread; pooled callable is json.dumps",
+   "expected_effect": "loop lag ~ batch wall time, growing with n"
+  },
+  "repro_file": ".audit/repros/test_run_batch.py",
+  "evidence": {
+   "lag_n10_s": 0.0085,
+   "elapsed_n10_s": 0.0082,
+   "lag_n200k_s": 2.3176,
+   "elapsed_n200k_s": 2.3199,
+   "submitted": 200000
+  },
+  "extreme_case": "A single large POST /batch (~200k items) freezes the event loop for ~2.3 s; 10 items stall it ~8 ms.",
+  "smallest_fix": "Do not call future.result() on the loop: await asyncio.wrap_future/gather over loop.run_in_executor, or run json.dumps inline.",
+  "reason": null,
+  "blocked_by": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "hang-reaches-entry@app.run_batch:86",
+  "verdict": "rejected",
+  "hypothesis": {
+   "trigger": "an unresponsive peer making future.result() wait forever",
+   "constraints": "future must wrap a call that can block indefinitely",
+   "expected_effect": "run_batch never returns"
+  },
+  "repro_file": ".audit/repros/test_run_batch.py",
+  "evidence": {
+   "note": "settled by reading: submitted callable is json.dumps on an in-memory dict, pure CPU; no I/O or lock"
+  },
+  "extreme_case": "None: the wait is bounded by CPU work.",
+  "smallest_fix": null,
+  "reason": "future wraps json.dumps, which cannot wait on a peer; wait is bounded by CPU work.",
+  "blocked_by": null,
+  "wrong_pattern": true
+ },
+ {
+  "finding": "unbounded-module-container@app.create_job:45",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "N sequential calls to create_job",
+   "constraints": "WORK_QUEUE never popped",
+   "expected_effect": "len(WORK_QUEUE)==N"
+  },
+  "repro_file": ".audit/repros/test_create_job.py",
+  "evidence": {
+   "before": 0,
+   "after": 50,
+   "calls": 50
+  },
+  "extreme_case": "Every POST /jobs appends permanently; memory and /stats payload grow linearly.",
+  "smallest_fix": "Remove WORK_QUEUE or bound it with deque(maxlen) / pop when process_job finishes.",
+  "reason": null,
+  "blocked_by": null,
+  "env_workaround": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "fire-and-forget-task@app.create_job:46",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "process_job raises in background (DB proxy raises on UPDATE)",
+   "constraints": "handle from create_task dropped",
+   "expected_effect": "caller sees queued, failure only as 'Task exception was never retrieved'"
+  },
+  "repro_file": ".audit/repros/test_create_job.py",
+  "evidence": {
+   "response": {
+    "id": 51,
+    "status": "queued"
+   },
+   "caller_exception": "None",
+   "loop_handler_messages": [
+    "Task exception was never retrieved"
+   ]
+  },
+  "extreme_case": "Job row stays queued forever and GET /jobs/{id} polls forever; only trace is a loop log line.",
+  "smallest_fix": "Keep task refs in a set with add_done_callback(discard) and a callback that logs and marks job failed.",
+  "reason": null,
+  "blocked_by": null,
+  "env_workaround": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "unbounded-module-container@app.process_job:55",
+  "verdict": "confirmed",
+  "hypothesis": {
+   "trigger": "call process_job N=50 times",
+   "constraints": "EVENTS module-level, never evicted",
+   "expected_effect": "len(EVENTS) grows by N"
+  },
+  "repro_file": ".audit/repros/test_process_job.py",
+  "evidence": {
+   "before": 0,
+   "after": 50,
+   "calls": 50,
+   "note": "time.sleep patched out; real process_job called"
+  },
+  "extreme_case": "Every job permanently appends a dict to EVENTS; memory grows linearly and /stats serialises the whole list.",
+  "smallest_fix": "Bound EVENTS with deque(maxlen=N) or drop it in favour of DB job status.",
+  "reason": null,
+  "blocked_by": null,
+  "wrong_pattern": false
+ },
+ {
+  "finding": "unbounded-module-container@app.record_request:28",
+  "verdict": "rejected",
+  "hypothesis": {
+   "trigger": "many requests hitting endpoints that call record_request",
+   "constraints": "keys must be unbounded in cardinality",
+   "expected_effect": "len(REQUEST_COUNTS) grows with request count"
+  },
+  "repro_file": null,
+  "evidence": {
+   "callers": [
+    "/health",
+    "/jobs",
+    "/jobs/{job_id}",
+    "/remote/{key}",
+    "/batch",
+    "/stats"
+   ],
+   "distinct_keys_max": 6,
+   "note": "all 6 call sites pass string literals (route templates), no other caller"
+  },
+  "extreme_case": "None: per-route counter capped at 6 keys.",
+  "smallest_fix": null,
+  "reason": "REQUEST_COUNTS is keyed by a fixed set of 6 literal route strings; also read back by /stats.",
+  "blocked_by": null,
+  "wrong_edge": null,
+  "wrong_pattern": true
+ }
+]

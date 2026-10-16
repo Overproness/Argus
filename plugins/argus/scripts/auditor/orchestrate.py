@@ -4,7 +4,7 @@ The `audit` skill drives rounds:
 
   queue   ranked, budgeted work items for the next round (.audit/queue.json); opens the round in the ledger.
           One item is one investigation of one function: every queued finding in that function (up to
-          MAX_PER_ITEM) rides along, low-severity ones included, so a site costs one investigator, not four.
+          MAX_PER_ITEM) rides along. Nearby items can share one investigator batch; budget is per item.
   ...     one investigator per item returns a verdict JSON list, one entry per finding in `findings`
   record  verdicts into .audit/verdicts.json, cross-checked against .audit/repro.json
   queue   next round: confirmed verdicts spawn caller-level items (effects travel up the call graph);
@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import paths
+from .identity import runtime_identity
 from .repro.runner import status_of
 
 SEV_W = {"high": 5.0, "medium": 3.0, "low": 1.0, "info": 0.5}
@@ -40,7 +41,7 @@ LATENCY_RULES = {"blocking-in-async", "cpu-heavy-in-async", "deadline-cannot-pre
                  "io-without-timeout", "timeout-budget-exceeded", "sync-over-async", "runblocking-in-suspend"}
 VERDICTS = {"confirmed", "rejected", "inconclusive"}
 MAX_DERIVED_PER_VERDICT = 3
-MAX_PER_ITEM = 5  # findings one investigator handles in one function
+MAX_PER_ITEM = 8  # keep related hypotheses together; batches also cap total findings and source size
 DEFAULT_BUDGET = {"total": 15, "per_round": 6, "max_rounds": 3}
 # Inconclusive for reasons outside the code (wrong tree, a broken reproduction run) is worth one more try.
 RETRYABLE = {"wrong-tree", "repro-error", "repro-check", "environment"}
@@ -83,6 +84,15 @@ class State:
         self.repro = _read(out_dir / "repro.json")
         self.ledger = _read(out_dir / "verdicts.json") or {
             "version": 1, "budget": dict(DEFAULT_BUDGET), "rounds": [], "verdicts": {}, "derived": {}}
+        # A later reproduction run may invalidate an old confirmation. Do not
+        # keep reporting it as proven or suppress its retry with a stale ledger.
+        for fid, verdict in self.ledger["verdicts"].items():
+            if verdict.get("verdict") != "confirmed":
+                continue
+            check = status_of(self.repro, verdict.get("via") or fid, verdict.get("repro_file"))
+            if check != "passed":
+                verdict.update(verdict="inconclusive", blocked_by="repro-check", repro_check=check,
+                               note="the latest reproduction no longer supports the saved confirmation")
         self.evidence = {finding_id(f): f["evidence"] for f in (self.trace or {}).get("findings", [])}
         self.hotspot = {h["function"]: h["score"] for h in self.map.get("hotspots", [])}
         self.lang_of = {fn["qualname"]: fn["lang"] for fn in self.map["functions"]}
@@ -353,12 +363,14 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
             from .repro import scaffold
             it["repro_skeleton"] = str(scaffold.write(it, out_dir / "repros"))
     skipped = [s for s in skipped if s["id"] not in riding]
+    from .investigations import prepare
+    batches = prepare(selected, out_dir, round_no, dry_run)
 
     result = {
         "round": None if stop else round_no, "stop": stop,
         "budget": {**b, "issued": len(primaries), "remaining": max(remaining, 0)},
         "repo": str(root), "path_warnings": paths.warnings(root),
-        "pending": pending, "items": selected,
+        "pending": pending, "items": selected, "batches": batches,
         "deferred": [it["id"] for it in ranked[take:]] if not stop else [it["id"] for it in ranked],
         "skipped": skipped, "hotspot_pass": from_hotspots and bool(selected),
     }
@@ -366,6 +378,7 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
         if selected:
             led["rounds"].append({
                 "round": round_no, "opened_at": now(), "items": [it["id"] for it in selected],
+                "batches": batches,
                 "findings": {it["id"]: [f["id"] for f in it["findings"]] for it in selected},
                 "same_effect": {f["id"]: f["same_effect"] for it in selected for f in it["findings"]
                                 if f.get("same_effect")},
@@ -523,10 +536,13 @@ def final(out_dir: Path) -> dict:
     return {
         "meta": {
             "tool": "argus/report", "version": 1, "generated_at": now(), "root": meta.get("root"),
+            "argus": runtime_identity(), "map_argus": meta.get("argus"),
             "languages": meta.get("languages", {}), "map_generated_at": meta.get("generated_at"),
             "trace": bool(st.trace), "repro": bool(st.repro),
             "rounds": len(led["rounds"]), "budget": led["budget"],
-            "investigated": len(led["verdicts"]),
+            "investigated": sum(len(r["items"]) for r in led["rounds"]),
+            "verdicts": len(led["verdicts"]),
+            "investigator_batches": sum(len(r.get("batches", r["items"])) for r in led["rounds"]),
             "stop": last_queue.get("stop"),
         },
         "summary": {"by_status": dict(counts),

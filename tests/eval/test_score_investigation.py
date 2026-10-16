@@ -53,3 +53,20 @@ def test_missing_audit_dir_raises(tmp_path):
     import pytest
     with pytest.raises(FileNotFoundError):
         scorer.score(tmp_path / "nope", None, None, None, None, None)
+
+
+def test_one_batch_does_not_turn_six_function_slots_into_six_agent_costs(tmp_path):
+    out = _audit(tmp_path, {}, [{"round": 1, "items": list("abcdef"),
+                               "batches": [{"item_ids": list("abcdef")}]}])
+    result = scorer.score(out, 12000, None, None, None, None)
+    assert result["investigator_runs"] == 1 and result["function_investigations_issued"] == 6
+    assert result["tokens_per_investigation"] == 12000
+    assert result["tokens_per_function_investigation"] == 2000
+
+
+def test_scoring_does_not_count_a_confirmation_invalidated_by_latest_repro(tmp_path):
+    out = _audit(tmp_path, {"rule@f:1": {"verdict": "confirmed"}}, [{"items": ["rule@f:1"]}])
+    (out / "repro.json").write_text(json.dumps({"tests": [
+        {"finding": "rule@f:1", "outcome": "failed"}]}))
+    result = scorer.score(out, None, None, None, None, None)
+    assert result["proven"] == 0 and result["by_verdict"]["inconclusive"] == 1

@@ -11,12 +11,13 @@
   auditor_cli.py trace-report <repo> [--out DIR] [--stall-ms 100] [--assume ARG=N]
   auditor_cli.py repro <repo> [--out DIR] [--file test_x.py] [--timeout 600] [--python PY]
   auditor_cli.py repro-env <repo> [--out DIR] [--python BASE_PY] [--with PKG ...]
-  auditor_cli.py queue <repo> [--budget 10] [--per-round 5] [--max-rounds 3] [--rule R] [--dry-run]
+  auditor_cli.py queue <repo> [--budget 15] [--per-round 6] [--max-rounds 3] [--rule R] [--dry-run]
   auditor_cli.py record <repo> (--file verdicts.json | -)
   auditor_cli.py report <repo> [--out DIR]
   auditor_cli.py fault-server [--latency S | --hang | --reset | --fail-first N] [--proxy HOST:PORT] [--record F]
   auditor_cli.py probe <repo> --lang L --name N [--opt key=value ...] [--build]
   auditor_cli.py langs
+  auditor_cli.py doctor
 """
 from __future__ import annotations
 
@@ -30,8 +31,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 REQS = Path(__file__).resolve().parent.parent / "requirements.txt"
 
 import bootstrap  # noqa: E402
+from auditor.identity import runtime_identity  # noqa: E402
 
-bootstrap.ensure_dependencies()  # a plain `python3` may lack tree-sitter and friends: use (or build) a private venv
+# Diagnostics must also work when dependencies are missing, without installing anything.
+if sys.argv[1:2] != ["doctor"]:
+    bootstrap.ensure_dependencies()
 
 
 def main() -> int:
@@ -109,8 +113,8 @@ def main() -> int:
     qp = sub.add_parser("queue", help="next round of findings to investigate, ranked and within budget")
     qp.add_argument("repo", type=Path)
     qp.add_argument("--out", type=Path, help="output dir (default: <repo>/.audit)")
-    qp.add_argument("--budget", type=int, help="total investigations across all rounds (default 10, remembered)")
-    qp.add_argument("--per-round", type=int, help="investigations per round (default 5, remembered)")
+    qp.add_argument("--budget", type=int, help="total function investigations across all rounds (default 15, remembered)")
+    qp.add_argument("--per-round", type=int, help="function investigations per round (default 6, remembered)")
     qp.add_argument("--max-rounds", type=int, help="round cap (default 3, remembered)")
     qp.add_argument("--rule", action="append", default=[], help="only these rules (repeatable)")
     qp.add_argument("--include-low", action="store_true", help="also queue low-severity findings")
@@ -135,6 +139,7 @@ def main() -> int:
                      help="scaffold option (crate=, module=, project=, sources=a.c,b.c, classpath=...)")
     np_.add_argument("--build", action="store_true", help="also build it now")
     sub.add_parser("langs", help="list supported languages and their SCIP indexers")
+    sub.add_parser("doctor", help="show this plugin's path, payload hashes and process identity (no repo needed)")
     if sys.argv[1:2] == ["fault-server"]:  # its flags are its own
         from auditor.repro import faults
         return faults.main(sys.argv[2:])
@@ -147,6 +152,11 @@ def main() -> int:
     args = ap.parse_args(argv)
     if passthrough is not None:
         args.command = passthrough
+
+    if args.cmd == "doctor":
+        status = runtime_identity()
+        print(json.dumps(status, indent=2))
+        return 1 if status["restart_required"] else 0
 
     try:
         from auditor import report, scip
@@ -298,6 +308,8 @@ def main() -> int:
                 for it in res["items"]:
                     more = [f["id"] for f in it["findings"][1:]]
                     print(f"  {it['score']:>5}  {it['id']}" + (f"  + {', '.join(more)}" if more else ""))
+                for batch in res["batches"]:
+                    print(f"  investigator batch ({batch['functions']} functions): {batch['context_file']}")
             if res["pending"]:
                 print(f"warning: {len(res['pending'])} item(s) from earlier rounds have no verdict: "
                       + ", ".join(res["pending"][:5]), file=sys.stderr)

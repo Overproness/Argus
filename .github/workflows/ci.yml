@@ -29,8 +29,15 @@ jobs:
       - uses: actions/setup-go@v5
         with: {go-version: stable}
       - run: npm install -g tsx
-      - run: pip install -r plugins/argus/requirements.txt
-      - run: python -m pytest tests -q -rs
+      - run: pip install -r plugins/argus/requirements.txt -r tests/fixtures/main_py_comparison/requirements.txt
+      - run: python -m pytest tests -q -rs --basetemp=.audit/ci-tests
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-heartbeat-diagnostics-${{ matrix.os }}
+          path: .audit/ci-tests/test_node_heartbeat_gap*/app/.audit/
+          include-hidden-files: true
+          if-no-files-found: ignore
 
   # Ground-truth recall/false-positive check (PLAN.md's evaluation corpus). Runs nightly and on demand,
   # not on every push: `kind: git` cases clone a real repository, which is slow and needs steady network

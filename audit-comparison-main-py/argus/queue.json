@@ -1,0 +1,475 @@
+{
+  "round": 1,
+  "stop": null,
+  "budget": {
+    "total": 15,
+    "per_round": 6,
+    "max_rounds": 3,
+    "issued": 0,
+    "remaining": 15
+  },
+  "repo": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target",
+  "path_warnings": [],
+  "pending": [],
+  "items": [
+    {
+      "rule": "race-across-await",
+      "severity": "high",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.fetch_remote",
+      "file": "app/main.py",
+      "line": 74,
+      "message": "Shared `CACHE` is read here and written at line 81, with an `await` in between. Other requests and tasks run during the await and change it, so this write loses their update or acts on a stale check (lost update, check-then-act, double spend). Hold one asyncio.Lock across the read and the write, or remove the await between them.",
+      "chain": [],
+      "reached_from": [],
+      "id": "race-across-await@app.fetch_remote:74",
+      "kind": "finding",
+      "trace_evidence": {
+        "status": "not-exercised",
+        "detail": "never ran under this workload",
+        "stats": null
+      },
+      "score": 8.4,
+      "harness": "in-process (repro/harness.py), or black-box",
+      "findings": [
+        {
+          "id": "race-across-await@app.fetch_remote:74",
+          "rule": "race-across-await",
+          "severity": "high",
+          "line": 74,
+          "message": "Shared `CACHE` is read here and written at line 81, with an `await` in between. Other requests and tasks run during the await and change it, so this write loses their update or acts on a stale check (lost update, check-then-act, double spend). Hold one asyncio.Lock across the read and the write, or remove the await between them.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        },
+        {
+          "id": "client-per-call@app.fetch_remote:78",
+          "rule": "client-per-call",
+          "severity": "medium",
+          "line": 78,
+          "message": "An HTTP client/session is constructed inside this function. If this function runs per request (or per loop iteration), it opens a brand-new connection pool every time instead of reusing one: slower (a new TCP/TLS handshake each call), and under load it can exhaust sockets. Build the client once (module scope, or app startup) and reuse it.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        },
+        {
+          "id": "unsanitized-url-query@app.fetch_remote:79",
+          "rule": "unsanitized-url-query",
+          "severity": "medium",
+          "line": 79,
+          "message": "A value is spliced directly into a URL's query string (string concat or an f-string/template literal) instead of going through `params=`/a query builder. A `&`, `#`, `%` or newline in the value changes the request's meaning (an extra parameter, a truncated path, header or log injection) and anything the server doesn't expect breaks the request. Pass it as `params=` (requests/httpx) or a URL-encoding helper so it is percent-encoded.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        },
+        {
+          "id": "unchecked-response@app.fetch_remote:80",
+          "rule": "unchecked-response",
+          "severity": "medium",
+          "line": 80,
+          "message": "`response` is read here with no status check (`raise_for_status()` / `.status_code` / `.ok`) between the request and this use. An error response (4xx/5xx, or a non-JSON body) is parsed or cached as if it were a success, and the failure surfaces later, far from its cause. Check the status before using the body.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        },
+        {
+          "id": "unbounded-module-container@app.fetch_remote:81",
+          "rule": "unbounded-module-container",
+          "severity": "medium",
+          "line": 81,
+          "message": "Module-level `CACHE` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        }
+      ],
+      "round": 1,
+      "repo": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target",
+      "abs_file": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/app/main.py",
+      "file_sha1": "838988a7b1ff",
+      "source": "   72  async def fetch_remote(key: str) -> dict[str, Any]:\n   73      record_request(\"/remote/{key}\")\n   74      cached = CACHE.get(key)\n   75      if cached and cached[0] > time.time():\n   76          return {\"key\": key, \"value\": cached[1], \"cached\": True}\n   77  \n   78      async with httpx.AsyncClient() as client:\n   79          response = await client.get(f\"https://example.com/?key={key}\", timeout=10)\n   80      value = response.text[:100]\n   81      CACHE[key] = (time.time() + 60, value)\n   82      return {\"key\": key, \"value\": value, \"cached\": False}",
+      "repro_skeleton": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/.audit/repros/test_fetch_remote.py"
+    },
+    {
+      "rule": "unbounded-wait-loop",
+      "severity": "high",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.get_job",
+      "file": "app/main.py",
+      "line": 65,
+      "message": "Polls a condition with no iteration cap and no deadline (no `time.time()`/`monotonic()` check against an elapsed bound). If the condition never becomes true, this loop runs forever, holding the request open indefinitely. Add a deadline (compare elapsed time to a max) or a maximum number of iterations.",
+      "chain": [],
+      "reached_from": [],
+      "id": "unbounded-wait-loop@app.get_job:65",
+      "kind": "finding",
+      "trace_evidence": {
+        "status": "not-exercised",
+        "detail": "never ran under this workload",
+        "stats": null
+      },
+      "score": 6.58,
+      "harness": "in-process (repro/harness.py), or black-box",
+      "findings": [
+        {
+          "id": "unbounded-wait-loop@app.get_job:65",
+          "rule": "unbounded-wait-loop",
+          "severity": "high",
+          "line": 65,
+          "message": "Polls a condition with no iteration cap and no deadline (no `time.time()`/`monotonic()` check against an elapsed bound). If the condition never becomes true, this loop runs forever, holding the request open indefinitely. Add a deadline (compare elapsed time to a max) or a maximum number of iterations.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        },
+        {
+          "id": "blocking-in-async@app.get_job:61",
+          "rule": "blocking-in-async",
+          "severity": "medium",
+          "line": 61,
+          "message": "Blocking call on an async path (blocking db `row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          },
+          "same_effect": [
+            "blocking-in-async@app.get_job:67"
+          ]
+        },
+        {
+          "id": "io-in-loop@app.get_job:67",
+          "rule": "io-in-loop",
+          "severity": "medium",
+          "line": 67,
+          "message": "db I/O inside a loop (blocking db `row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()`). Cost grows with collection size (N+1 pattern); batch, cache or bound concurrency.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        }
+      ],
+      "round": 1,
+      "repo": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target",
+      "abs_file": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/app/main.py",
+      "file_sha1": "838988a7b1ff",
+      "source": "   59  async def get_job(job_id: int) -> dict[str, Any]:\n   60      record_request(\"/jobs/{job_id}\")\n   61      row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()\n   62      if row is None:\n   63          raise HTTPException(status_code=404, detail=\"job not found\")\n   64  \n   65      while row[2] != \"done\":\n   66          await asyncio.sleep(0.01)\n   67          row = DB.execute(\"select id, name, status from jobs where id = ?\", (job_id,)).fetchone()\n   68      return {\"id\": row[0], \"name\": row[1], \"status\": row[2]}",
+      "repro_skeleton": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/.audit/repros/test_get_job.py"
+    },
+    {
+      "rule": "blocking-in-async",
+      "severity": "high",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.run_batch",
+      "file": "app/main.py",
+      "line": 89,
+      "message": "Blocking call on an async path (blocking future `results = [future.result() for future in futures]`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+      "chain": [],
+      "reached_from": [],
+      "id": "blocking-in-async@app.run_batch:89",
+      "kind": "finding",
+      "trace_evidence": {
+        "status": "not-exercised",
+        "detail": "never ran under this workload",
+        "stats": null
+      },
+      "score": 5.84,
+      "harness": "in-process (repro/harness.py), or black-box",
+      "findings": [
+        {
+          "id": "blocking-in-async@app.run_batch:89",
+          "rule": "blocking-in-async",
+          "severity": "high",
+          "line": 89,
+          "message": "Blocking call on an async path (blocking future `results = [future.result() for future in futures]`). A slow response stalls the asyncio event loop, freezing every coroutine.",
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        },
+        {
+          "id": "hang-reaches-entry@app.run_batch:86",
+          "rule": "hang-reaches-entry",
+          "severity": "medium",
+          "line": 86,
+          "message": "`app.run_batch` can wait forever: app.run_batch \u2192 future @ app/main.py:89 (no timeout). No timeout or deadline bounds this path, so one unresponsive peer freezes this entry point.",
+          "chain": [
+            "app.run_batch",
+            "future @ app/main.py:89 (no timeout)"
+          ],
+          "trace_evidence": {
+            "status": "not-exercised",
+            "detail": "never ran under this workload",
+            "stats": null
+          }
+        }
+      ],
+      "round": 1,
+      "repo": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target",
+      "abs_file": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/app/main.py",
+      "file_sha1": "838988a7b1ff",
+      "source": "   86  async def run_batch(items: list[str]) -> dict[str, int]:\n   87      record_request(\"/batch\")\n   88      futures = [POOL.submit(json.dumps, {\"item\": item, \"at\": time.time()}) for item in items]\n   89      results = [future.result() for future in futures]\n   90      return {\"submitted\": len(results)}",
+      "repro_skeleton": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/.audit/repros/test_run_batch.py"
+    },
+    {
+      "rule": "unbounded-module-container",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.create_job",
+      "file": "app/main.py",
+      "line": 45,
+      "message": "Module-level `WORK_QUEUE` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+      "chain": [],
+      "reached_from": [],
+      "id": "unbounded-module-container@app.create_job:45",
+      "kind": "finding",
+      "trace_evidence": {
+        "status": "not-verifiable",
+        "stats": {
+          "calls": 1,
+          "total_s": 0.1555,
+          "self_s": 0.1554,
+          "p50_s": 0.1555,
+          "p95_s": 0.1555,
+          "max_s": 0.1555,
+          "max_self_slice_s": 0.1554,
+          "stalls": 1,
+          "is_coro": true
+        },
+        "detail": "tracing cannot decide `unbounded-module-container`; ran 1\u00d7, max 156 ms; 1 stall(s) passed through this function"
+      },
+      "score": 4.25,
+      "harness": "in-process (repro/harness.py), or black-box",
+      "findings": [
+        {
+          "id": "unbounded-module-container@app.create_job:45",
+          "rule": "unbounded-module-container",
+          "severity": "medium",
+          "line": 45,
+          "message": "Module-level `WORK_QUEUE` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+          "trace_evidence": {
+            "status": "not-verifiable",
+            "stats": {
+              "calls": 1,
+              "total_s": 0.1555,
+              "self_s": 0.1554,
+              "p50_s": 0.1555,
+              "p95_s": 0.1555,
+              "max_s": 0.1555,
+              "max_self_slice_s": 0.1554,
+              "stalls": 1,
+              "is_coro": true
+            },
+            "detail": "tracing cannot decide `unbounded-module-container`; ran 1\u00d7, max 156 ms; 1 stall(s) passed through this function"
+          }
+        },
+        {
+          "id": "fire-and-forget-task@app.create_job:46",
+          "rule": "fire-and-forget-task",
+          "severity": "medium",
+          "line": 46,
+          "message": "A spawned task whose handle is dropped. Nothing waits for it, so its errors and panics vanish, shutdown does not wait for it, and (Python) it can be garbage collected mid-run.",
+          "trace_evidence": {
+            "status": "not-verifiable",
+            "stats": {
+              "calls": 1,
+              "total_s": 0.1555,
+              "self_s": 0.1554,
+              "p50_s": 0.1555,
+              "p95_s": 0.1555,
+              "max_s": 0.1555,
+              "max_self_slice_s": 0.1554,
+              "stalls": 1,
+              "is_coro": true
+            },
+            "detail": "tracing cannot decide `fire-and-forget-task`; ran 1\u00d7, max 156 ms; 1 stall(s) passed through this function"
+          }
+        }
+      ],
+      "round": 1,
+      "repo": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target",
+      "abs_file": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/app/main.py",
+      "file_sha1": "838988a7b1ff",
+      "source": "   39  async def create_job(name: str) -> dict[str, Any]:\n   40      record_request(\"/jobs\")\n   41      cursor = DB.execute(\"insert into jobs (name, status) values (?, ?)\", (name, \"queued\"))\n   42      DB.commit()\n   43      job_id = cursor.lastrowid\n   44  \n   45      WORK_QUEUE.append(name)\n   46      asyncio.create_task(process_job(job_id, name))\n   47      return {\"id\": job_id, \"name\": name, \"status\": \"queued\"}",
+      "repro_skeleton": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/.audit/repros/test_create_job.py"
+    },
+    {
+      "rule": "unbounded-module-container",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.process_job",
+      "file": "app/main.py",
+      "line": 55,
+      "message": "Module-level `EVENTS` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+      "chain": [],
+      "reached_from": [],
+      "id": "unbounded-module-container@app.process_job:55",
+      "kind": "finding",
+      "trace_evidence": {
+        "status": "not-verifiable",
+        "stats": {
+          "calls": 1,
+          "total_s": 0.1513,
+          "self_s": 0.151,
+          "p50_s": 0.1513,
+          "p95_s": 0.1513,
+          "max_s": 0.1513,
+          "max_self_slice_s": 0.151,
+          "stalls": 1,
+          "is_coro": true
+        },
+        "detail": "tracing cannot decide `unbounded-module-container`; ran 1\u00d7, max 151 ms; 1 stall(s) passed through this function"
+      },
+      "score": 3.4,
+      "harness": "in-process (repro/harness.py), or black-box",
+      "findings": [
+        {
+          "id": "unbounded-module-container@app.process_job:55",
+          "rule": "unbounded-module-container",
+          "severity": "medium",
+          "line": 55,
+          "message": "Module-level `EVENTS` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+          "trace_evidence": {
+            "status": "not-verifiable",
+            "stats": {
+              "calls": 1,
+              "total_s": 0.1513,
+              "self_s": 0.151,
+              "p50_s": 0.1513,
+              "p95_s": 0.1513,
+              "max_s": 0.1513,
+              "max_self_slice_s": 0.151,
+              "stalls": 1,
+              "is_coro": true
+            },
+            "detail": "tracing cannot decide `unbounded-module-container`; ran 1\u00d7, max 151 ms; 1 stall(s) passed through this function"
+          }
+        }
+      ],
+      "round": 1,
+      "repo": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target",
+      "abs_file": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/app/main.py",
+      "file_sha1": "838988a7b1ff",
+      "source": "   50  async def process_job(job_id: int | None, name: str) -> None:\n   51      await asyncio.sleep(0.01)\n   52      time.sleep(0.2)\n   53      DB.execute(\"update jobs set status = ? where id = ?\", (\"done\", job_id))\n   54      DB.commit()\n   55      EVENTS.append({\"job_id\": job_id, \"name\": name, \"finished_at\": time.time()})",
+      "repro_skeleton": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/.audit/repros/test_process_job.py"
+    },
+    {
+      "rule": "unbounded-module-container",
+      "severity": "medium",
+      "confidence": "heuristic",
+      "lang": "python",
+      "function": "app.record_request",
+      "file": "app/main.py",
+      "line": 28,
+      "message": "Module-level `REQUEST_COUNTS` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+      "chain": [],
+      "reached_from": [],
+      "id": "unbounded-module-container@app.record_request:28",
+      "kind": "finding",
+      "trace_evidence": {
+        "status": "not-verifiable",
+        "stats": {
+          "calls": 2,
+          "total_s": 0.0001,
+          "self_s": 0.0001,
+          "p50_s": 0.0,
+          "p95_s": 0.0001,
+          "max_s": 0.0001,
+          "max_self_slice_s": 0.0001,
+          "stalls": 0,
+          "is_coro": false
+        },
+        "detail": "tracing cannot decide `unbounded-module-container`; ran 2\u00d7, max 0 ms"
+      },
+      "score": 2.9,
+      "harness": "in-process (repro/harness.py), or black-box",
+      "findings": [
+        {
+          "id": "unbounded-module-container@app.record_request:28",
+          "rule": "unbounded-module-container",
+          "severity": "medium",
+          "line": 28,
+          "message": "Module-level `REQUEST_COUNTS` is only ever added to across this file, never popped, removed or cleared. Every request or background cycle that adds to it grows the process's memory a little more, for as long as the process runs. It is never read back by key either; check it is still needed at all. Evict old entries (an LRU/TTL cache, a max size, or a cleanup pass) or move it out of module scope.",
+          "trace_evidence": {
+            "status": "not-verifiable",
+            "stats": {
+              "calls": 2,
+              "total_s": 0.0001,
+              "self_s": 0.0001,
+              "p50_s": 0.0,
+              "p95_s": 0.0001,
+              "max_s": 0.0001,
+              "max_self_slice_s": 0.0001,
+              "stalls": 0,
+              "is_coro": false
+            },
+            "detail": "tracing cannot decide `unbounded-module-container`; ran 2\u00d7, max 0 ms"
+          }
+        }
+      ],
+      "round": 1,
+      "repo": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target",
+      "abs_file": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/app/main.py",
+      "file_sha1": "838988a7b1ff",
+      "source": "   27  def record_request(path: str) -> None:\n   28      REQUEST_COUNTS[path] = REQUEST_COUNTS.get(path, 0) + 1",
+      "repro_skeleton": "/private/tmp/claude-501/-Users-adyaanahmed-Documents-hello-guys-/b00b1548-7f33-4549-ac88-353566d7102f/scratchpad/argus_target/.audit/repros/test_record_request.py"
+    }
+  ],
+  "deferred": [],
+  "skipped": [
+    {
+      "id": "blocking-in-async@app.health:34",
+      "reason": "trace: confirmed at run time (1 stall(s) on the predicted stack with 150 ms of latency injected at `app.health`, worst 208 ms (the event loop was bloc); no investigation needed",
+      "severity": "high",
+      "lang": "python"
+    },
+    {
+      "id": "blocking-in-async@app.process_job:52",
+      "reason": "trace: confirmed at run time (1 stall(s) on the predicted stack with 150 ms of latency injected at `app.process_job`, worst 151 ms (the event loop was); no investigation needed",
+      "severity": "high",
+      "lang": "python"
+    },
+    {
+      "id": "blocking-in-async@app.create_job:41",
+      "reason": "trace: confirmed at run time (1 stall(s) on the predicted stack with 150 ms of latency injected at `app.create_job`, worst 155 ms (the event loop was ); no investigation needed",
+      "severity": "medium",
+      "lang": "python"
+    },
+    {
+      "id": "blocking-in-async@app.create_job:42",
+      "reason": "trace: confirmed at run time (1 stall(s) on the predicted stack with 150 ms of latency injected at `app.create_job`, worst 155 ms (the event loop was ); no investigation needed",
+      "severity": "medium",
+      "lang": "python"
+    },
+    {
+      "id": "blocking-in-async@app.process_job:53",
+      "reason": "trace: confirmed at run time (1 stall(s) on the predicted stack with 150 ms of latency injected at `app.process_job`, worst 151 ms (the event loop was); no investigation needed",
+      "severity": "medium",
+      "lang": "python"
+    },
+    {
+      "id": "blocking-in-async@app.process_job:54",
+      "reason": "trace: confirmed at run time (1 stall(s) on the predicted stack with 150 ms of latency injected at `app.process_job`, worst 151 ms (the event loop was); no investigation needed",
+      "severity": "medium",
+      "lang": "python"
+    }
+  ],
+  "hotspot_pass": false
+}

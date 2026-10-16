@@ -588,6 +588,131 @@ def unchecked_response(spec, fn_node, body, is_async):
     return []
 
 
+def buffered_response_slice(spec, fn_node, body, is_async):
+    """A slice of an eager HTTP response is not a bound on downloaded bytes."""
+    imported = imports(_root(fn_node))
+
+    def canonical(n):
+        first, dot, rest = text(n).partition(".")
+        return imported.get(first, first) + dot + rest
+
+    constructors = {"httpx.Client", "httpx.AsyncClient", "requests.Session"}
+    clients, responses = set(), set()
+    for n in walk(_root(fn_node), _skip_nested):
+        if n.type == "assignment":
+            rhs = n.child_by_field_name("right")
+            if rhs is not None and rhs.type == "call" and canonical(rhs.child_by_field_name("function")) in constructors:
+                clients.add(text(n.child_by_field_name("left")))
+    clients -= _locals(fn_node, body)
+    for n in walk(body, _skip_nested):
+        if n.type == "as_pattern" and n.named_children:
+            value = n.named_children[0]
+            if value.type == "call" and canonical(value.child_by_field_name("function")) in constructors:
+                clients.add(text(n.named_children[-1]))
+        elif n.type == "assignment":
+            name, rhs = text(n.child_by_field_name("left")), n.child_by_field_name("right")
+            responses.discard(name)
+            clients.discard(name)
+            if rhs is not None and rhs.type == "await":
+                rhs = rhs.named_children[0] if rhs.named_children else None
+            if rhs is None or rhs.type != "call":
+                continue
+            fn = rhs.child_by_field_name("function")
+            if canonical(fn) in constructors:
+                clients.add(name)
+            elif fn is not None and fn.type == "attribute":
+                method = text(fn.child_by_field_name("attribute"))
+                receiver = text(fn.child_by_field_name("object"))
+                if method in HTTP_VERBS - {"send", "stream"} and (
+                        receiver in clients or canonical(fn).rsplit(".", 1)[0] in {"httpx", "requests"}):
+                    responses.add(name)
+        elif n.type == "subscript":
+            value = n.child_by_field_name("value")
+            if value is None or value.type != "attribute":
+                continue
+            if (text(value.child_by_field_name("object")) in responses
+                    and text(value.child_by_field_name("attribute")) in {"text", "content"}
+                    and any(c.type == "slice" and re.search(r":\s*\w", text(c)) for c in n.named_children)):
+                return [HookHit(
+                    "buffered-response-slice", "medium", n.start_point[0] + 1,
+                    "Slices an HTTP response's text/content after the full body is materialized. "
+                    "The returned slice does not limit downloaded bytes or peak memory; a large upstream "
+                    "body can exhaust memory. Verify upstream size guarantees or stream bytes with a "
+                    "bounded chunk size and stop after the limit.",
+                )]
+    return []
+
+
+def unbounded_background_tasks(spec, fn_node, body, is_async):
+    """Known FastAPI routes that detach work without retaining or awaiting it."""
+    if not is_async or fn_node.parent is None or fn_node.parent.type != "decorated_definition":
+        return []
+    imported = imports(_root(fn_node))
+
+    def canonical(n):
+        first, dot, rest = text(n).partition(".")
+        return imported.get(first, first) + dot + rest
+
+    routers = set()
+    for n in walk(_root(fn_node), _skip_nested):
+        if n.type == "assignment":
+            rhs = n.child_by_field_name("right")
+            if rhs is not None and rhs.type == "call" and canonical(rhs.child_by_field_name("function")) in {
+                    "fastapi.FastAPI", "fastapi.APIRouter"}:
+                routers.add(text(n.child_by_field_name("left")))
+    route = any(re.match(r"@" + re.escape(router) + r"\.(get|post|put|patch|delete|websocket)\s*\(", text(d))
+                for router in routers for d in fn_node.parent.named_children if d.type == "decorator")
+    if not route:
+        return []
+    for n in walk(body, _skip_nested):
+        if (n.type == "call" and n.parent is not None and n.parent.type in {"expression_statement", "block"}
+                and canonical(n.child_by_field_name("function")) in {"asyncio.create_task", "asyncio.ensure_future"}):
+            return [HookHit(
+                "unbounded-background-tasks", "medium", n.start_point[0] + 1,
+                "This request handler detaches a background task and returns without waiting for it. "
+                "Repeated requests can accumulate pending work after request slots are released. "
+                "Check admission limits outside this function; a worker semaphore alone does not bound "
+                "queued tasks. Use a bounded worker queue or retain an admission permit until the task finishes.",
+            )]
+    return []
+
+
+def wallclock_expiry(spec, fn_node, body, is_async):
+    """A locally generated expiry compared with the same adjustable wall clock.
+
+    Subtracting timestamps is not the only interval: a TTL stored as
+    `(time.time() + ttl, value)` and compared with `time.time()` has the same
+    clock-jump failure. Ordinary timestamps without offset + comparison do not.
+    """
+    imported = imports(_root(fn_node))
+    locals_ = _locals(fn_node, body)
+
+    def clock(n):
+        if n is None or n.type != "call":
+            return False
+        first, dot, rest = text(n.child_by_field_name("function")).partition(".")
+        return first not in locals_ and imported.get(first, first) + dot + rest == "time.time"
+
+    nodes = list(walk(body, _skip_nested))
+    offsets = [n for n in nodes if n.type == "binary_operator"
+               and text(n.child_by_field_name("operator")) == "+"
+               and (clock(n.child_by_field_name("left")) or clock(n.child_by_field_name("right")))]
+    if not offsets:
+        return []
+    clock_names = {text(n.child_by_field_name("left")) for n in nodes if n.type == "assignment"
+                   and clock(n.child_by_field_name("right"))}
+    if not any(n.type == "comparison_operator" and any(
+            clock(c) or (c.type == "identifier" and text(c) in clock_names) for c in walk(n)) for n in nodes):
+        return []
+    return [HookHit(
+        "wallclock-interval", "medium", offsets[0].start_point[0] + 1,
+        "Builds a relative expiry with the adjustable wall clock and compares against that clock. "
+        "A backward jump prolongs the TTL; a forward jump expires entries early. Use time.monotonic() "
+        "for process-local TTLs/deadlines. Verify whether persisted or cross-process epoch timestamps "
+        "are intentionally required before changing the clock.",
+    )]
+
+
 def threads_and_fanout(spec, fn_node, body, is_async):
     """A thread started per call and never joined; tasks started per item with no cap."""
     hits = []
@@ -694,7 +819,8 @@ SPEC = LangSpec(
     ],
     imports=imports,
     hooks=[locks, race_across_await, mutate_while_iterating, threads_and_fanout, uncommitted_write,
-           unbounded_module_container, client_per_call, unchecked_response],
+           unbounded_module_container, client_per_call, unchecked_response, wallclock_expiry,
+           buffered_response_slice, unbounded_background_tasks],
     implicit_calls=grpc_stream_reads,
     startup=re.compile(r"on_event\(\s*['\"]startup|\.on_startup\b|\blifespan\b"),
     stall_phrase="the asyncio event loop, freezing every coroutine",

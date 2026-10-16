@@ -1,0 +1,3 @@
+# Target dependencies recorded by the supplied plain audit (2026-10-14).
+fastapi==0.115.6
+httpx==0.28.1
