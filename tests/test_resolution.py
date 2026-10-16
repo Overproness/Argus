@@ -351,8 +351,9 @@ def test_injected_latency_proves_which_calls_block_the_loop(tmp_path):
          "function": fn, "file": "app.py", "line": 0, "message": "", "chain": [fn, "app.Slow.fetch"],
          "reached_from": []} for fn in ("app.on_loop", "app.off_loop")]
     (tmp_path / ".audit" / "map.json").write_text(json.dumps(m))
-    subprocess.run([sys.executable, CLI, "trace", tmp_path, "--inject-latency", "150", "--",
-                    sys.executable, "app.py"], check=True, capture_output=True, timeout=120)
+    traced = subprocess.run([sys.executable, CLI, "trace", tmp_path, "--inject-latency", "150", "--",
+                             sys.executable, "app.py"], capture_output=True, text=True, timeout=120)
+    assert traced.returncode == 0, traced.stdout + traced.stderr
     ev = {f["function"]: f["evidence"] for f in json.loads((tmp_path / ".audit" / "trace.json").read_text())["findings"]
           if f["rule"] == "blocking-in-async"}
     assert ev["app.on_loop"]["status"] == "confirmed"  # decorated: matched by its def line

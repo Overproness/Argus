@@ -95,9 +95,12 @@ class Tracer:
         # CO_OPTIMIZED (0x1) is set for functions only, not module or class bodies.
         if code.co_flags & 0x1 and not code.co_name.startswith("<") and not code.co_filename.startswith("<"):
             path = os.path.abspath(code.co_filename).replace("\\", "/")
-            if path.startswith(self.root) and not any(d in path for d in NOISE_DIRS):
-                res = (path[len(self.root):], _def_line(path, code.co_firstlineno, code.co_name),
-                       bool(code.co_flags & CO_COROUTINE))
+            if path.startswith(self.root):
+                rel = path[len(self.root):]
+                # Ignore generated/dependency code inside the repo, not ancestors of the repo itself.
+                if not any(d in "/" + rel for d in NOISE_DIRS):
+                    res = (rel, _def_line(path, code.co_firstlineno, code.co_name),
+                           bool(code.co_flags & CO_COROUTINE))
         self._info[code] = res
         return res
 
