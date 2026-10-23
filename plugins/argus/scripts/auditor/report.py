@@ -69,6 +69,7 @@ def to_json(m: RepoMap) -> dict:
             "caller_id": e.caller, "callee_id": e.callee,
             "line": e.line, "awaited": e.awaited, "context": e.context,
             "loop_depth": e.loop_depth, "confidence": e.confidence, "deadline_s": e.timeout_s,
+            "deadline_unknown": e.deadline_unknown or None,
         } for e in m.edges],
     }
 
@@ -145,8 +146,9 @@ def to_markdown(data: dict, max_findings: int = 200, max_rows: int = 150) -> str
         out.append("| Caller | Callee | Location | Deadline | Inner worst wait | Status |")
         out.append("|---|---|---|---|---|---|")
         for d in fx["deadlines"]:
+            deadline = f"{d['deadline_s']:g} s" if d["deadline_s"] is not None else "present (value unparsed)"
             out.append(f"| `{_cell(d['caller'])}` | `{_cell(d['callee'])}` | {d['location']} | "
-                       f"{d['deadline_s']:g} s | {_cell(d['inner_wait'])} | {d['status']} |")
+                       f"{deadline} | {_cell(d['inner_wait'])} | {d['status']} |")
         out.append("")
     if fx.get("retries"):
         out.append("**Retry sites**\n")

@@ -280,3 +280,74 @@ def test_unflagged_hotspots_spend_leftover_budget(tmp_path):
     orchestrate.record(out, [{"finding": h["id"], "verdict": "rejected", "reason": "read it, nothing there"}])
     q3 = orchestrate.queue(out, {"per_round": 5}, dry_run=True)
     assert h["id"] not in {it["id"] for it in q3["items"]}
+
+
+def _write_repo(tmp_path, source):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text(source)
+    out = repo / ".audit"
+    report.write(RepoMap(repo).load(), out)
+    return out
+
+
+def _finding_id(out, rule):
+    m = json.loads((out / "map.json").read_text())
+    return next(f"{f['rule']}@{f['function']}:{f['line']}" for f in m["findings"] if f["rule"] == rule)
+
+
+def test_low_findings_fill_leftover_budget_after_higher_severity(tmp_path):
+    out = _write_repo(tmp_path, '''
+import asyncio
+import time
+
+
+async def block():
+    time.sleep(0.1)
+
+
+def buffer():
+    q = asyncio.Queue()
+''')
+    low_id = _finding_id(out, "unbounded-channel")
+    q = orchestrate.queue(out, {"total": 5, "per_round": 5, "max_rounds": 1})
+    assert [it["id"] for it in q["items"]][-1] == low_id  # after every higher-severity item
+    assert q["items"][-1]["low_tail"] and q["items"][-1]["severity"] == "low"
+    assert low_id not in {s["id"] for s in q["skipped"]}
+
+
+def test_low_findings_are_deferred_not_dropped_when_budget_is_short(tmp_path):
+    out = _write_repo(tmp_path, '''
+import asyncio
+import time
+
+
+async def block():
+    time.sleep(0.1)
+
+
+def buffer():
+    q = asyncio.Queue()
+''')
+    low_id = _finding_id(out, "unbounded-channel")
+    high_id = _finding_id(out, "blocking-in-async")
+    q = orchestrate.queue(out, {"total": 1, "per_round": 1, "max_rounds": 1})
+    assert [it["id"] for it in q["items"]] == [high_id]
+    assert low_id in q["deferred"] and low_id not in {s["id"] for s in q["skipped"]}
+
+
+def test_low_findings_still_ride_free_in_a_queued_function(tmp_path):
+    out = _write_repo(tmp_path, '''
+import asyncio
+import time
+
+
+async def block():
+    time.sleep(0.1)
+    q = asyncio.Queue()
+''')
+    q = orchestrate.queue(out, {"total": 5, "per_round": 5, "max_rounds": 1})
+    [item] = q["items"]
+    assert item["function"] == "app.block" and not item.get("low_tail")
+    assert {f["severity"] for f in item["findings"]} == {"high", "low"}
+    assert not q["skipped"]

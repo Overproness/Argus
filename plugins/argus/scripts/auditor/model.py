@@ -121,6 +121,7 @@ class Edge:
     loop_kinds: list[str]
     confidence: str  # "exact" | "scip" | "unique" | "name"
     timeout_s: float | None = None  # deadline the caller wraps around this call
+    deadline_unknown: bool = False  # a deadline wraps the call but its value is not a readable literal
 
 
 @dataclass

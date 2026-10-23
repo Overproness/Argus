@@ -216,6 +216,8 @@ def lock_across_await(spec, fn_node, body, is_async):
         value = text(node.child_by_field_name("value"))
         if not re.search(r"\.(lock|read|write)\(\)", value) or ".await" in value:
             continue
+        if value.lstrip().startswith("{"):
+            continue  # the guard is scoped to a block and dropped at its end, before any later await
         if not (is_async or _inside(node, "async_block", body)):
             continue
         guard = text(node.child_by_field_name("pattern")).replace("mut ", "").strip()

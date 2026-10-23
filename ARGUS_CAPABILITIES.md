@@ -92,7 +92,9 @@ the way it used to be. Still blind to env vars and runtime config objects.
 - `repro-env` builds a venv with the target repo's own dependencies so tests
   import the real app, not a stub.
 - `queue` groups up to 8 findings per function, with low-severity ones riding
-  along, ranked by severity × confidence × trace evidence × hotspot score.
+  along; lows whose function is not queued fill leftover budget after every
+  higher-severity item. Ranked by severity × confidence × trace evidence ×
+  hotspot score.
   Nearby functions share a bounded investigator batch (same file/language,
   at most 6 items, 24 findings and 12k source characters). Budget is per
   function item, not per batch. Only matching language/rule guidance is loaded.

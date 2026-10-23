@@ -322,7 +322,7 @@ footer { color: var(--muted); font-size: 12.5px; }
   if (fx.deadlines && fx.deadlines.length) $("fx-deadlines").append(el("h3", {text: "Deadlines: an outer timeout around an inner call"}),
     table(["Caller → callee", "Deadline", "Inner worst wait", "Status"], fx.deadlines.map((d) => [
       el("span", {}, mono(d.caller + " → " + d.callee), el("br"), el("span", {class: "muted mono", text: d.location})),
-      secs(d.deadline_s), d.inner_wait, pill("st st-" + d.status, d.status)])));
+      d.deadline_s == null ? "present (value unparsed)" : secs(d.deadline_s), d.inner_wait, pill("st st-" + d.status, d.status)])));
   if (fx.retries && fx.retries.length) $("fx-retries").append(el("h3", {text: "Retry sites"}),
     table(["Function", "Kind", "Attempts", "Backoff"], fx.retries.map((r) => [
       el("span", {}, mono(r.function), el("br"), el("span", {class: "muted mono", text: r.location})), r.kind,

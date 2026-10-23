@@ -257,7 +257,8 @@ class RepoMap:
                 for c in cands:
                     self.edges.append(Edge(fn.id, c.id, call.line, call.awaited, call.context,
                                            call.loop_depth, call.loop_kinds, conf,
-                                           call.timeout_s if call.has_timeout else None))
+                                           call.timeout_s if call.has_timeout else None,
+                                           deadline_unknown=call.has_timeout and call.timeout_s is None))
         self.out_edges = defaultdict(list)
         self.in_edges = defaultdict(list)
         for e in self.edges:

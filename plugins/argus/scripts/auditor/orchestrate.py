@@ -98,7 +98,11 @@ class State:
         self.lang_of = {fn["qualname"]: fn["lang"] for fn in self.map["functions"]}
         self.callers = defaultdict(list)  # callee qualname -> [(caller, line, deadline, in a loop)]
         for e in self.map["edges"]:
-            self.callers[e["callee"]].append((e["caller"], e["line"], e.get("deadline_s"), bool(e.get("loop_depth"))))
+            deadline = e.get("deadline_s")
+            self.callers[e["callee"]].append((
+                e["caller"], e["line"],
+                deadline if deadline is not None else ("?" if e.get("deadline_unknown") else None),
+                bool(e.get("loop_depth"))))
         self.entries = {fn["qualname"] for fn in self.map["functions"] if fn.get("is_entry")}
 
     def save_ledger(self):
@@ -177,7 +181,8 @@ def _derive(st: State, fid: str, v: dict) -> list[dict]:
             "lang": st.lang_of.get(caller, "?"), "function": caller, "file": "", "line": line,
             "message": (f"`{function}` was confirmed ({rule}); check whether the effect reaches its caller "
                         f"`{caller}` (call at line {line}"
-                        + (f", inside a {deadline:g} s deadline" if deadline else "") + "). "
+                        + (f", inside a {deadline:g} s deadline" if isinstance(deadline, (int, float))
+                           else ", inside a deadline" if deadline else "") + "). "
                         f"Trigger: {hyp.get('trigger', 'as in the confirmed reproduction')}."),
             "chain": [caller, function], "reached_from": [],
             "given": {"confirmed": fid, "evidence": v.get("evidence"), "repro_file": v.get("repro_file")},
@@ -326,7 +331,20 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
         else:
             it["findings"] = [_brief(it)]
             by_fn[f"{it['function']}#{it['id']}"] = it
-    ranked = sorted(by_fn.values(), key=lambda x: -x["score"])
+    # Low-severity leads ride free when their function is queued anyway. When it is not, they rank
+    # below every higher-severity item but ahead of unflagged-hotspot filler: leftover budget goes
+    # to a real lead, not to a blank entry point.
+    tail_ids: set[str] = set()
+    if not include_low and not rules:
+        for r in sorted(riders, key=lambda x: -x["score"]):
+            if r["function"] not in by_fn:
+                r["harness"] = harness_for(r["lang"])
+                r["findings"] = [_brief(r)]
+                r["low_tail"] = True
+                by_fn[r["function"]] = r
+                tail_ids.add(r["id"])
+    riders = [r for r in riders if r["id"] not in tail_ids]
+    ranked = sorted(by_fn.values(), key=lambda x: (x.get("low_tail", False), -x["score"]))
     from_hotspots = False
     if not ranked and remaining > 0 and round_no <= b["max_rounds"]:
         # Nothing left to investigate, but budget remains: spend it checking entry points no rule flagged
@@ -362,7 +380,7 @@ def queue(out_dir: Path, budget: dict | None = None, rules: set[str] | None = No
         if not dry_run:
             from .repro import scaffold
             it["repro_skeleton"] = str(scaffold.write(it, out_dir / "repros"))
-    skipped = [s for s in skipped if s["id"] not in riding]
+    skipped = [s for s in skipped if s["id"] not in riding and s["id"] not in tail_ids]
     from .investigations import prepare
     batches = prepare(selected, out_dir, round_no, dry_run)
 

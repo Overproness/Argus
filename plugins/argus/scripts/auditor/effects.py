@@ -191,6 +191,11 @@ class Effects:
                 if e.timeout_s is not None and not self.cannot_preempt(e) and w > e.timeout_s:
                     w, formula = e.timeout_s, f"capped by {fmt(e.timeout_s)} deadline"
                     path = path + [f"(capped by the {fmt(e.timeout_s)} deadline at {fn.file}:{c.line})"]
+                elif e.deadline_unknown and w == INF and not self.cannot_preempt(e):
+                    # A deadline exists but its value is not a readable literal: it bounds an
+                    # infinite wait, but says nothing about a finite one.
+                    w, formula = BOUNDED, "bounded by a deadline whose value was not parsed"
+                    path = path + [f"(bounded by an unparsed deadline at {fn.file}:{c.line})"]
                 cands.append((w, path, formula))
             if not cands:
                 continue
@@ -265,17 +270,18 @@ class Effects:
 
     def _deadlines(self):
         for e in self.m.edges:
-            if e.timeout_s is None:
+            if e.timeout_s is None and not e.deadline_unknown:
                 continue
             caller, callee = self.fns[e.caller], self.fns[e.callee]
             D = e.timeout_s
+            what = f"The {fmt(D)} deadline" if D is not None else "The deadline"
             row = {"caller": caller.qualname, "callee": callee.qualname, "location": f"{caller.file}:{e.line}",
                    "deadline_s": D, "inner_wait_s": None, "inner_wait": "blocks the thread", "status": "ok"}
             blocked = self.cannot_preempt(e)
             if blocked:
                 row["status"] = "cannot-preempt"
                 self._add("deadline-cannot-preempt", "high", e.confidence, caller, e.line,
-                          f"The {fmt(D)} deadline around `{callee.qualname}` cannot fire while it blocks the "
+                          f"{what} around `{callee.qualname}` cannot fire while it blocks the "
                           "thread it runs on, so a stalled call holds the caller for its full duration. "
                           "Offload the blocking part (spawn_blocking / to_thread) or make it async.",
                           chain=[caller.qualname, *blocked])
@@ -288,11 +294,11 @@ class Effects:
                 if w == INF and offloaded:
                     row["status"] = "abandons-thread"
                     self._add("timeout-budget-exceeded", "medium", e.confidence, caller, e.line,
-                              f"The {fmt(D)} deadline gives up on `{callee.qualname}`, but the offloaded thread "
+                              f"{what} gives up on `{callee.qualname}`, but the offloaded thread "
                               f"keeps waiting with no bound ({formula or 'no timeout'}). Threads cannot be "
                               "cancelled, so every timeout leaks one blocked worker.",
                               chain=[caller.qualname, *path])
-                elif D < w < INF:
+                elif D is not None and D < w < INF:
                     row["status"] = "exceeded"
                     note = (" The offloaded thread keeps running after the deadline fires."
                             if offloaded else " The inner request keeps its connection until its own timeout.")

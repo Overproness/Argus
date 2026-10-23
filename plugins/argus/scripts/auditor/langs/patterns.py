@@ -66,7 +66,7 @@ RULES: dict[str, tuple[str, str, dict[str, re.Pattern]]] = {
     }),
     "fire-and-forget-task": ("low", "A spawned task whose handle is dropped. Nothing waits for it, so its errors and "
                                     "panics vanish, shutdown does not wait for it, and (Python) it can be garbage collected mid-run.", {
-        "rust": _r(r"^\s*(tokio::)?(task::)?spawn\s*\("),
+        "rust": _r(r"^\s*(?:(?:tokio::)?(?:task::)?|(?:std::)?thread::)spawn\s*\(|^\s*[\w:()]+\.spawn\s*\("),
         "python": _r(r"^\s*(asyncio\.)?(create_task|ensure_future)\s*\("),
         "java": _r(r"new\s+Thread\s*\([^;]*\)\s*\.start\s*\(\s*\)"),
     }),
@@ -158,6 +158,29 @@ def _sql_values_interpolated(line: str) -> bool:
     return any(not _SAFE_SQL_PART.match(n.strip().split(".")[-1]) for n in names) if names else True
 
 
+_LET_START = re.compile(r"^\s*let\b")
+
+
+def _joined_lets(lines: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Rust `let` bindings wrap across lines (`let x = self\\n.foo()\\n.await;`): join them into one
+    logical line so per-line statement rules see the whole binding."""
+    out: list[tuple[int, str]] = []
+    buf: tuple[int, str] | None = None
+    for ln, s in lines:
+        if buf is not None:
+            buf = (buf[0], buf[1] + " " + s.strip())
+            if ";" in s:
+                out.append(buf)
+                buf = None
+        elif _LET_START.match(s) and ";" not in s:
+            buf = (ln, s)
+        else:
+            out.append((ln, s))
+    if buf is not None:
+        out.append(buf)
+    return out
+
+
 def pattern_rules(spec, fn_node, body, is_async) -> list[HookHit]:
     lines = _lines(body)
     sig = _signature(fn_node, body)
@@ -196,7 +219,7 @@ def pattern_rules(spec, fn_node, body, is_async) -> list[HookHit]:
     rx = _ASSIGN_AWAIT.get(spec.name)
     if rx is not None and is_async:
         prev = None
-        for ln, s in lines:
+        for ln, s in (_joined_lets(lines) if spec.name == "rust" else lines):
             m = rx.match(s)
             if m and prev is not None and not re.search(rf"\b{re.escape(prev[1])}\b", m.group(2)):
                 hits.append(HookHit("sequential-awaits", "low", prev[0], _SEQ_MSG))

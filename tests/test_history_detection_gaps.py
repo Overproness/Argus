@@ -2,6 +2,7 @@
 
 The integration probes in .audit run real historical code; these small cases
 exercise detection and false-positive controls without trading dependencies.
+The tail of this file covers the relaybench misses from the Kimi VM audit.
 """
 from auditor.analysis import RepoMap
 
@@ -246,3 +247,118 @@ fn bounded(client: &RpcClient) {
 }
 ''', "rs")
     assert [f.function.rsplit("::", 1)[-1] for f in repo.findings if f.rule == "unbounded-retry"] == ["lookup"]
+
+
+# --- relaybench misses (Kimi VM audit): the seeded bugs the map did not flag ---
+
+def _rules_for(repo, suffix):
+    return {f.rule for f in repo.findings if f.function.endswith(suffix)}
+
+
+def test_rust_receiver_spawn_is_fire_and_forget(tmp_path):
+    repo = mapped(tmp_path, '''
+use tokio::runtime::Handle;
+pub async fn refresh(fail: bool) -> Result<(), String> {
+    let handle = Handle::current();
+    handle.spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        if fail { Err("refresh unavailable".to_owned()) } else { Ok(()) }
+    });
+    Ok(())
+}
+pub async fn refresh_awaited(fail: bool) -> Result<(), String> {
+    let task = Handle::current().spawn(async move { if fail { Err("x".to_owned()) } else { Ok(()) } });
+    task.await.map_err(|e| e.to_string())?
+}
+''', "rs")
+    assert "fire-and-forget-task" in _rules_for(repo, "::refresh")
+    assert "fire-and-forget-task" not in _rules_for(repo, "::refresh_awaited")
+
+
+def test_rust_sequential_awaits_spanning_lines(tmp_path):
+    repo = mapped(tmp_path, '''
+impl SummaryClient {
+    pub async fn dashboard(&self) -> (u64, u64) {
+        let region = self
+            .region_stats()
+            .await;
+        let supply = self
+            .supply_stats()
+            .await;
+        (region, supply)
+    }
+    pub async fn joined(&self) -> (u64, u64) {
+        let (region, supply) = tokio::join!(self.region_stats(), self.supply_stats());
+        (region, supply)
+    }
+    pub async fn dependent(&self) -> u64 {
+        let region = self
+            .region_stats()
+            .await;
+        let supply = self
+            .supply_for(region)
+            .await;
+        supply
+    }
+}
+''', "rs")
+    assert "sequential-awaits" in _rules_for(repo, "::dashboard")
+    assert "sequential-awaits" not in _rules_for(repo, "::joined")
+    assert "sequential-awaits" not in _rules_for(repo, "::dependent")
+
+
+def test_rust_block_scoped_guard_is_not_lock_across_await(tmp_path):
+    repo = mapped(tmp_path, '''
+use std::sync::Mutex;
+use std::time::Duration;
+pub struct Cache { pub rows: Mutex<Vec<String>> }
+impl Cache {
+    pub async fn snapshot(&self, publish_delay: Duration) -> Vec<String> {
+        let guard = self.rows.lock().unwrap();
+        tokio::time::sleep(publish_delay).await;
+        guard.clone()
+    }
+    pub async fn snapshot_scoped(&self, publish_delay: Duration) -> Vec<String> {
+        let snapshot = {
+            let guard = self.rows.lock().unwrap();
+            guard.clone()
+        };
+        tokio::time::sleep(publish_delay).await;
+        snapshot
+    }
+}
+''', "rs")
+    assert "lock-across-await" in _rules_for(repo, "Cache::snapshot")
+    assert "lock-across-await" not in _rules_for(repo, "Cache::snapshot_scoped")
+
+
+HEALTH = '''
+import asyncio
+import time
+
+
+class HealthMonitor:
+    def __init__(self, delay=0.005, deadline=0.02):
+        self.delay = delay
+        self.deadline = deadline
+
+    async def pulse(self):
+        %s
+        return "ready"
+
+    async def check(self):
+        return await asyncio.wait_for(self.pulse(), timeout=self.deadline)
+'''
+
+
+def test_deadline_with_variable_value_cannot_preempt(tmp_path):
+    repo = mapped(tmp_path, HEALTH % "time.sleep(self.delay)", "py")
+    assert "deadline-cannot-preempt" in _rules_for(repo, "HealthMonitor.check")
+    pulse = next(f for f in repo.functions.values() if f.qualname.endswith(".pulse"))
+    edge = next(e for e in repo.edges if e.callee == pulse.id)
+    assert edge.timeout_s is None and edge.deadline_unknown
+
+
+def test_deadline_with_variable_value_quiet_when_callee_is_async(tmp_path):
+    repo = mapped(tmp_path, HEALTH % "await asyncio.sleep(self.delay)", "py")
+    assert not [f for f in repo.findings if f.rule == "deadline-cannot-preempt"]

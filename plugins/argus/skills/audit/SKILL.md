@@ -110,7 +110,9 @@ Between rounds the queue does the following on its own:
 - It suppresses findings whose chain uses a call edge an investigator rejected
   (`wrong_edge`).
 - It groups findings by function, then batches nearby items for one
-  investigator. Low-severity findings in a queued function ride along for free.
+  investigator. Low-severity findings in a queued function ride along for
+  free; lows whose function is not queued rank below every higher-severity
+  item, so leftover budget goes to them before any unflagged-hotspot filler.
 - It queues findings in every language. Each item's `harness` field tells the
   investigator how to reproduce it:
   - Python in-process;
