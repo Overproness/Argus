@@ -1,258 +1,225 @@
 # Argus
 
-Claude Code plugin marketplace for agentic code-audit workflows, by the CODEFORGE AI Team. See [PLAN.md](PLAN.md).
+**Find runtime risks. Investigate them. Keep the evidence.**
 
-## Argus (plugin)
+Argus is a Claude Code plugin for auditing concurrency, I/O, and performance
+risks. It maps a codebase, ranks suspicious functions, and guides an investigator
+to write and run reproductions against the real application. Reports distinguish
+executed proof from runtime observations, unresolved leads, and rejected claims.
 
-A static audit map for six languages (Rust, Python, JavaScript/TypeScript, Go,
-Java, C, C++), plus runtime observation that turns the map's findings into
-evidence:
-- a built-in function tracer for Python;
-- Node's own profiler for JavaScript and TypeScript (a V8 sampling profile plus
-  exact call counts from V8 coverage), switched on automatically;
-- a Rust `tracing-chrome` trace import (one poll of an instrumented span per
-  slice; a long poll on an async function's stack is a stall);
-- an OpenTelemetry receiver for everything instrumented (the Java agent, or
-  any SDK);
-- heartbeat stalls for any program that prints;
-- profiles recorded elsewhere: V8 `.cpuprofile`, or speedscope JSON from
-  py-spy.
+Built by the CODEFORGE AI Team. Available through this repository's own Claude
+Code marketplace, with a CLI and an MCP server for other agent clients.
 
-It produces:
+The free [Argus Audit setup skill](skills/argus-audit/SKILL.md) explains how to
+connect those tools in another agent. It requires the full Argus installation.
 
-- the call graph;
-- a list of every I/O and external call (network, database, filesystem, sleeps,
-  processes, waits), each marked blocking or not, with its context and timeout
-  status;
-- findings: blocking calls on async paths (followed through call chains),
-  missing timeouts, I/O in loops (N+1), sync locks held across `await`,
-  sync-over-async, unbounded goroutines, `defer` in loops, recursion, nested
-  loops, and source-pattern leads (unbounded channels, floats for money, wall
-  clock used for intervals, sequential awaits, fire-and-forget spawns, panics
-  on parsed data, catastrophic-backtracking regexes, unpaginated queries,
-  backoff without jitter, CPU-heavy work on an async path);
-- hotspots;
-- runtime evidence per finding: event-loop stalls with their call stack, N+1
-  fan-out counts, recursion depth, O(n^k) complexity fits, and stalls the
-  static rules did not predict;
-- effects across the call graph (M4): the worst-case wait of every entry
-  point, with timeouts, library defaults and retry counts multiplied along each
-  path. Findings from this:
-  - deadlines that cannot fire because the code under them blocks the thread;
-  - inner timeouts and retries that do not fit the caller's deadline;
-  - entry points that can wait forever;
-  - retries with no backoff, retries with no limit, and retry amplification
-    across layers;
-  - `unwrap`/`expect` on network results;
-  - Go I/O errors discarded with `_`;
-- scaling projections: super-linear functions projected to the largest input
-  seen upstream, or to a size given with `--assume`;
-- linter evidence: SARIF results (clippy, ruff, golangci-lint, eslint,
-  semgrep, ...) placed in the map function they fall in; a result that means
-  the same as a map finding corroborates it, the rest are leads;
-- reproductions in any of the six languages: a bounded batch of nearby
-  function investigations shares one investigator's setup. That agent writes a
-  test per finding that triggers the predicted effect under controlled
-  conditions (injected latency, dead peer, simulated outage, scaling inputs),
-  runs it, and reports a verdict with numbers:
-  - Python code runs in-process;
-  - every other language runs against the **fault server** (a local mock API
-    or TCP proxy that injects faults and counts connections), either as a
-    black-box run of the real program or as a **native probe**: a small
-    program in the target language, in a side project that depends on the repo
-    by path;
-  - probes are verified for Rust, JavaScript, TypeScript, Java, Go, C and C++;
+## Install and run
 
-- budgeted rounds (M4): a deterministic queue picks what to reproduce next,
-  follows confirmed effects up to their callers, and suppresses findings whose
-  call edge an investigator rejected;
-- a final report (`report.html`, `report.md`, `report.json`) that ranks every
-  finding by how far it got: proven, observed, unverified, inconclusive,
-  not observed, rejected.
+Use **Python 3.12+** for the full workflow, including the built-in Python tracer.
+The plugin starts its MCP server with `python3`, so make that command available
+in the environment where Claude Code runs. Native reproductions also need the
+target language's compiler or runtime and the application's dependencies.
 
-Rust I/O mapping includes standard output macros, typed file handles, and
-blocking or awaited nonblocking Solana RPC clients. It follows simple local
-macros that await expression arguments, as well as `tokio::join!`/`try_join!`.
-Python mapping includes implicit reads in `async for` over generated
-`grpc.aio` streams. Subscription deadlines and enclosing read deadlines are
-recognized; an independent cancellation watchdog still needs investigation.
+Inside Claude Code:
 
-**Getting started needs nothing but Python 3.12+.** `pip install` is optional:
-the first time the CLI or the MCP server runs on a machine without
-`tree-sitter` and friends, it builds a private virtualenv under
-`~/.cache/argus/venv` (override with `$ARGUS_HOME`), installs the
-requirements into it once, and carries on. Expect the very first run to take
-about half a minute; every run after that starts instantly. If you would
-rather use your own environment, `pip install -r plugins/argus/requirements.txt`
-still works and skips all of this.
-
-For **Python, C, C++ and Rust** specifically, everything below works with just
-that (plus `gcc`/`g++`/`cargo` on your `PATH` if you want native reproduction
-probes for C/C++/Rust; Argus cannot compile your code without them). Python
-3.12+ programs are also traced function-by-function with no setup at all.
-
-```bash
-python plugins/argus/scripts/auditor_cli.py langs             # supported languages
-python plugins/argus/scripts/auditor_cli.py map path/to/repo  # -> path/to/repo/.audit/map.{json,md}
-python plugins/argus/scripts/auditor_cli.py index path/to/repo  # optional: SCIP indexes for precise calls
-python plugins/argus/scripts/auditor_cli.py trace path/to/repo -- python -m pytest tests
-#   -> path/to/repo/.audit/trace.{json,md}; Python 3.12+ is traced function by function
-python plugins/argus/scripts/auditor_cli.py trace path/to/repo -- npm test
-#   Node: sampling profile + exact call counts, on automatically for node/npm/npx/yarn/pnpm/tsx
-python plugins/argus/scripts/auditor_cli.py trace path/to/repo --otlp --heartbeat "tick" -- java -javaagent:otel.jar -jar app.jar
-#   any language: OpenTelemetry spans + stalls from gaps between "tick" lines
-python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --otlp-file collector-dump.json
-python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --profile py-spy.speedscope.json
-python plugins/argus/scripts/auditor_cli.py trace-import path/to/repo --chrome trace-1234.json   # Rust tracing-chrome
-python plugins/argus/scripts/auditor_cli.py lint-import path/to/repo --sarif ruff.sarif   # linter results as evidence
-python plugins/argus/scripts/auditor_cli.py trace-report path/to/repo --assume rows=50000  # rebuild, project sizes
-#   runs accumulate in .audit/trace/; delete it to start over
-python plugins/argus/scripts/auditor_cli.py repro path/to/repo   # run .audit/repros/test_*.py -> .audit/repro.{json,md}
-python plugins/argus/scripts/auditor_cli.py queue path/to/repo --budget 10 --per-round 5 --max-rounds 3
-python plugins/argus/scripts/auditor_cli.py record path/to/repo --file verdicts.json   # or --file - for stdin
-python plugins/argus/scripts/auditor_cli.py report path/to/repo  # -> .audit/report.{json,md,html}
-python plugins/argus/scripts/auditor_cli.py fault-server --hang --record conns.jsonl   # point any program at it
-python plugins/argus/scripts/auditor_cli.py probe path/to/repo --lang rust --name fetch --build  # native probe side project
-
-# Try the plugin without installing it
-claude --plugin-dir plugins/argus
-#   /argus:audit path/to/repo --budget 10 [-- <workload>]   everything, in budgeted rounds, ending in the report
-#   /argus:audit-map path/to/repo                       static map + triage
-#   /argus:audit-trace path/to/repo -- <command>        runtime evidence
-#   /argus:audit-investigate path/to/repo               one round of reproductions via the argus:investigator agent
-#   MCP tools (any client, see plugins/argus/.mcp.json):
-#     audit_status, audit_map, audit_trace, audit_trace_import, audit_lint_import, run_repro, audit_queue, audit_record, audit_report
-
-# Install it through this marketplace (inside Claude Code)
-/plugin marketplace add <path or git URL of this repo>
+```text
+/plugin marketplace add Overproness/Argus
 /plugin install argus@argus
 ```
 
-Argus uses **Git commit versions** for marketplace updates. Neither
-`plugins/argus/.claude-plugin/plugin.json` nor the marketplace entry sets a
-`version`: Claude Code otherwise treats every checkout with that string as the
-same cached plugin, even when its code has changed. This previously left installs
-stuck on `0.2.0`. See [Claude Code's version resolution](https://code.claude.com/docs/en/plugins/loading#how-claude-code-computes-the-version).
-Commit changes before testing marketplace updates; use `--plugin-dir` for
-uncommitted development work. A standalone directory without Git has no commit
-version, so use `--plugin-dir` for that copy too.
+Start a new Claude Code session, then audit a local checkout:
 
-After the fix reaches your marketplace's remote branch, update from a terminal:
+```text
+/argus:audit /path/to/repo --budget 15 --per-round 6 --max-rounds 3
+```
+
+On first use, Argus installs missing Python dependencies into a private
+environment under `~/.cache/argus/venv`; this requires package-download access.
+Set `ARGUS_HOME` to change its cache directory. To manage dependencies yourself,
+install `plugins/argus/requirements.txt` in your chosen Python environment.
+
+The default budget is **15 function investigations**, up to **6 per round**,
+across **3 rounds**. Nearby functions can share an investigator's setup while
+retaining separate findings and verdicts. A budget limits investigations; it
+does not guarantee that every lead will be examined. Low-severity leads use
+remaining capacity after higher-severity items.
+
+For development, clone the repository and load your checkout directly:
+
+```sh
+claude --plugin-dir ./plugins/argus
+```
+
+## What it looks for
+
+Argus analyzes **Python, Rust, JavaScript, TypeScript, Go, Java, C, and C++**.
+Its language-specific rules and runtime integrations differ; use `langs` to see
+the exact supported extensions.
+
+| Risk | Examples of leads |
+|---|---|
+| Blocked concurrency | Blocking I/O or CPU work on async paths; synchronous locks held across `await`; sync-over-async |
+| Requests that never finish | Missing I/O deadlines; retries without a bound; a deadline wrapping code that blocks its own executor |
+| Amplified work | I/O in loops, layered retries, repeated client construction, independent sequential awaits |
+| Uncontrolled lifetime or growth | Detached tasks, unbounded queues, background-task admission, cache and buffer growth |
+| Incorrect assumptions | Wall-clock TTL arithmetic, floating-point money, error handling and other source-pattern risks |
+
+The map includes functions, call edges, known external calls, timeout information,
+and ranked leads. Optional SCIP indexes improve call resolution, while SARIF
+imports place linter results alongside the relevant functions.
+
+Current coverage includes non-literal deadline values, Rust receiver-based
+spawns such as `handle.spawn(...)`, multiline await bindings, and block-scoped
+lock guards. These rules remain heuristics that need investigation in context.
+
+## From lead to finding
+
+1. **Map:** parse the source and identify risky paths.
+2. **Observe:** optionally exercise the application or import a recorded trace.
+3. **Investigate:** select functions within the budget and run reproductions
+   under `.audit/repros/`, using the actual application source.
+4. **Record:** retain the result, measurements, and proof associated with each
+   finding. Setup failures and unfinished investigations stay inconclusive.
+5. **Report:** write `.audit/report.html`, `.audit/report.md`, and
+   `.audit/report.json`.
+
+The report separates **proven**, **observed**, **unverified**, **inconclusive**,
+**not-observed**, and **rejected** results. A static warning alone is a lead.
+Fault-injected observations describe behavior under those injected conditions.
+Absence of a stall under one workload does not prove that a path is safe.
+
+Python reproductions can run in-process. Other languages can use a small native
+probe that depends on the application by path, or a black-box workload against
+a local fault server. The server can inject latency, hangs, connection resets,
+and failures while counting connections.
+
+## CLI and MCP
+
+The deterministic CLI can map and rank code without a model. Writing and
+interpreting new reproductions is the agent's part of the workflow.
+
+From a repository checkout:
+
+```sh
+python plugins/argus/scripts/auditor_cli.py doctor
+python plugins/argus/scripts/auditor_cli.py langs
+python plugins/argus/scripts/auditor_cli.py map /path/to/repo
+python plugins/argus/scripts/auditor_cli.py queue /path/to/repo --budget 15 --per-round 6 --max-rounds 3
+```
+
+Useful commands for collecting and reviewing evidence:
+
+```sh
+# Observe an existing workload; use the application's interpreter/environment.
+python plugins/argus/scripts/auditor_cli.py trace /path/to/repo -- python -m pytest tests
+python plugins/argus/scripts/auditor_cli.py trace /path/to/repo -- npm test
+
+# Import evidence recorded elsewhere.
+python plugins/argus/scripts/auditor_cli.py trace-import /path/to/repo --chrome trace.json
+python plugins/argus/scripts/auditor_cli.py trace-import /path/to/repo --profile profile.cpuprofile
+python plugins/argus/scripts/auditor_cli.py lint-import /path/to/repo --sarif results.sarif
+
+# Run agent-written reproductions and record their verdicts.
+python plugins/argus/scripts/auditor_cli.py repro-env /path/to/repo
+python plugins/argus/scripts/auditor_cli.py repro /path/to/repo
+python plugins/argus/scripts/auditor_cli.py record /path/to/repo --file verdicts.json
+python plugins/argus/scripts/auditor_cli.py report /path/to/repo
+```
+
+`repro-env` is for Python applications: it installs their dependencies under
+`.audit/venv`. It is separate from Argus's own dependency environment.
+
+Runtime evidence comes from Python's built-in function tracer on Python 3.12+,
+Node's profiler and V8 coverage, imported Rust `tracing-chrome` traces,
+OpenTelemetry spans, heartbeat gaps, or imported V8/speedscope profiles.
+OpenTelemetry collection is opt-in with `trace --otlp`; external programs must
+already be instrumented. See the [trace guide](plugins/argus/skills/audit-trace/SKILL.md)
+for setup and attribution limits.
+
+Other MCP clients can start the same tools over stdio:
+
+```sh
+python plugins/argus/scripts/mcp_server.py
+```
+
+Tools include `audit_status`, `audit_map`, `audit_trace`, `audit_trace_import`,
+`audit_lint_import`, `audit_repro_env`, `run_repro`, `audit_queue`, `audit_record`,
+and `audit_report`. Map and trace responses return summaries by default, with
+paths to full output files; `full=true` requests the complete result inline.
+
+## Updates and runtime identity
+
+This Git-hosted marketplace uses commit-based versions. Keep `version` absent
+from the plugin and marketplace manifests; a fixed version string can leave
+users on a stale cached payload when later commits reuse it.
+
+Update from a terminal, then start a new Claude Code session:
 
 ```sh
 claude plugin marketplace update argus
 claude plugin update argus@argus
-claude plugin list
 ```
 
-For the maintainer's commit/PR/publish sequence, see [PUBLISHING.md](PUBLISHING.md).
+Before comparing audit runs, run CLI `doctor` in the intended checkout and call
+MCP `audit_status` in each audit session. Record the plugin path and payload hash,
+and compare them with the intended installation. Restart if `restart_required`
+is true. A fresh CLI process does not identify an already-running MCP server.
 
-Start a new Claude Code session after updating so its skills and MCP server use
-the new copy. Existing sessions can keep using the code they already loaded.
-For a marketplace added from a local checkout, update that checkout first.
-There is no need to delete caches or uninstall a plugin used by other sessions.
+See [PUBLISHING.md](PUBLISHING.md) for the maintainer release workflow.
 
-To check the actual code, run `python plugins/argus/scripts/auditor_cli.py doctor`
-in the intended checkout, then call the `audit_status` MCP tool in the audit
-session. Compare `plugin_sha256` values; paths may differ between a checkout and
-its installed copy. `loaded_plugin_sha256` captures the payload when that process
-started, while `restart_required` detects subsequent changes to its files.
-An old server without `audit_status` needs an update and a new session. The doctor
-command works without third-party dependencies and does not install packages.
-Map and final report JSON also record the plugin identity; the final report
-preserves both the mapper's identity and its own, so mixed copies remain visible.
-These hashes identify file bytes, not an attestation of every module in memory;
-restart after any update rather than editing files under a running server.
+## GitHub Actions
 
-Layout of `plugins/argus/scripts/auditor/`:
-
-| File | Role |
-|---|---|
-| `extract.py` | Generic tree-sitter extraction, driven by a language spec |
-| `langs/*.py` | One spec per language: node types, async rules, I/O rules, hooks |
-| `langs/patterns.py` | Source-pattern rules shared by every language (one hook, one table of regexes per rule) |
-| `analysis.py` | Call resolution, I/O classification, passing effects between functions, findings |
-| `identity.py` | Plugin payload hashes and process identity, shared by CLI diagnostics, MCP status, maps and reports |
-| `investigations.py` | Bounded batches and compact, language/rule-specific investigator context; budget stays per function item |
-| `effects.py` | Worst-case waits, deadlines, retry multipliers and crash-on-error, propagated across the call graph |
-| `timeouts.py` | Durations out of source text: timeout arguments, deadline wrappers, sleeps, library defaults |
-| `scip.py` | Precise call resolution from SCIP indexes (no protobuf dependency), plus the indexer runner |
-| `linters.py` | SARIF import: results placed in map functions, corroborating equivalent map findings |
-| `report.py` | `map.json` and `map.md` output |
-| `trace/store.py` | SQLite trace store: one file per traced process, merged on read |
-| `trace/py/tracer.py` | Python tracer (`sys.monitoring`): per-call timing in slices, self time, event-loop stalls, argument sizes |
-| `trace/run.py` | Runs a command with tracers attached through `AUDIT_TRACE_*` environment variables, Node's profiler and coverage (`NODE_OPTIONS`, `NODE_V8_COVERAGE`), an OTLP receiver (`--otlp`) and heartbeat capture (`--heartbeat`) |
-| `trace/otlp.py` | OpenTelemetry in, from any language: OTLP/HTTP receiver (protobuf and JSON, gzip) and file importer |
-| `trace/spans.py` | Spans mapped to map functions; client spans as observed external calls; heartbeat gaps as stalls attributed to the deepest covering span |
-| `trace/profiles.py` | Sampling profiles (V8 `.cpuprofile`, speedscope) as activations and loop stalls with stacks; V8 coverage as exact call counts; profile clocks aligned with spans and heartbeats |
-| `trace/chrome.py` | Chrome trace-event importer (Rust `tracing-chrome`): per-poll slices mapped to repo functions by `.file`/`.line` span fields or by name |
-| `trace/sources.py` | Everything under `.audit/trace/` as one trace, and imports of spans, profiles, coverage and chrome traces recorded elsewhere |
-| `protowire.py` | Minimal protobuf wire reader shared by the SCIP and OTLP decoders (no protobuf dependency) |
-| `procs.py` | Finds programs the way a shell would, so `npm`, `mvn`, `gradle` and other `.cmd`/`.bat` shims run on Windows |
-| `trace/fit.py` | Complexity fitting: (input size, duration) samples to O(n^k) |
-| `trace/evidence.py` | Joins traces to `map.json`; writes `trace.json` and `trace.md` |
-| `repro/harness.py` | Reproduction helpers: `latency`, `hang`, `fail_connect`, `count_connects`, `refuse_remote`, `loop_monitor`, `call_with_deadline`, `scaling`, `count_calls`; each emits `@@evidence` lines |
-| `repro/faults.py` | Fault server for any language: a mock HTTP API or TCP proxy with latency, hang, reset and fail-first-N; records every connection |
-| `repro/native.py` | `run_target` (run and observe any program: deadline, exit code, heartbeat gaps, `@@evidence` lines, process-tree kill) and native probe scaffolds for Rust, JavaScript, TypeScript, Java, Go, C and C++ |
-| `repro/runner.py` | Runs `.audit/repros/test_*.py` under pytest, collects outcomes and evidence into `repro.{json,md}` |
-| `orchestrate.py` | The round loop: ranked, budgeted queue with follow-ups and suppression; verdict ledger checked against repro results; final report data |
-| `report_html.py` | `report.json`, `report.md` and a self-contained, theme-aware `report.html` (publishable as a claude.ai artifact) |
-| `../hooks/guard.py` | PreToolUse guard: blocks live exchange hosts, credentials and destructive commands in audit runs and reproduction files |
-| `../mcp_server.py` | MCP server exposing `audit_status`, `audit_map`, `audit_trace`, `audit_trace_import`, `audit_lint_import`, `run_repro`, `audit_queue`, `audit_record`, `audit_report` over stdio |
-| `../scripts/bootstrap.py` | Builds a private virtualenv and re-execs the CLI or MCP server under it if the launching `python3` lacks Argus's dependencies |
-| `../scripts/ci_helpers.py` | The two small helpers `action.yml` calls (step outputs, severity gate), kept as real scripts rather than inline YAML |
-
-Plugin components outside `scripts/`: `skills/audit`, `skills/audit-map`, `skills/audit-trace`,
-`skills/audit-investigate`, `agents/investigator.md`, `hooks/hooks.json`, `.mcp.json`.
-
-Files under `<repo>/.audit/`: `map.*` (static), `scip/` (indexes), `trace/` and
-`trace.*` (runtime), `lint.*` (linter evidence), `repros/` and `repro.*`
-(reproductions), `queue.json` (the current round), `verdicts.json` (the
-ledger: budget, rounds, verdicts, follow-ups), and `report.*` (final).
-
-**Scope: Rust, Python, JavaScript/TypeScript, Go, Java, C/C++.** Every
-capability targets these six. [PLAN.md](PLAN.md#language-parity) keeps a
-parity matrix of which language has which capability, verified or not. To add
-a language or library, add or extend a `LangSpec` in `langs/` and a fixture in
-`tests/fixtures/lang/`, and add a probe scaffold in `repro/native.py` with a
-test in `tests/test_native.py`. To add a runtime adapter for another language,
-write the `calls` and `stalls` tables from `trace/store.py` and read the
-`AUDIT_TRACE_*` variables set by `trace/run.py`.
-
-**In CI.** [`action.yml`](action.yml) is a composite GitHub Action for auditing
-another repository: static `map`, optional linter SARIF, a job summary, an
-uploaded `.audit/` artifact, and an optional severity gate:
+The [composite action](action.yml) creates a static map, writes a job summary,
+and optionally imports SARIF from installed linters. It needs no model API key.
+It does not run the agent investigation workflow.
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: <org>/Argus@main
+- uses: Overproness/Argus@main # Pin a reviewed commit SHA for a stable workflow.
   with:
-    fail-on: high        # optional: fail the step on any high-severity finding
-    run-linters: true    # optional: fold in ruff / golangci-lint SARIF if installed
+    path: .
+    run-linters: false
+    # fail-on: high          # Optional gate on static leads, not proven bugs.
 ```
 
-It costs no AI tokens (it is static analysis only). It has not been run on
-GitHub yet.
+Review audit artifacts before sharing them: they can contain source excerpts,
+local paths, traces, and application data.
 
-**MCP responses are summaries by default.** `audit_map`, `audit_trace` and
-`audit_trace_import` return counts plus the 10 most severe findings and the
-path to the full file; pass `full=true` for everything inline. This keeps large
-repos from spending thousands of tokens on findings you may not need in
-context.
+## Scope and evaluation
 
-**Measuring quality.** `python tests/eval/run.py` scores Argus's static map
-against ground-truth cases in `tests/eval/corpus.yaml` (recall by rule and
-language, plus `must_be_absent` false-positive checks). It ships with 3 local
-cases that keep the harness itself honest; **real-repository cases are not
-collected yet**, so treat its 100% as "the harness works", not "Argus is good
-on real code". See [PLAN.md](PLAN.md#getting-to-full-parity-milestone-m5).
-Needs `pip install -r tests/eval/requirements.txt`.
+Argus focuses on runtime and composition risks recognizable from source and
+executable behavior. It is not a general domain-logic oracle. Dynamic dispatch,
+generated code, custom libraries, deployment policies, and incomplete workloads
+can leave gaps. Rules can produce false positives, and a finite budget can leave
+real issues uninvestigated. A report is not a certification that a repository
+is bug-free.
 
-Tests: `python -m pytest tests`. Toolchain-dependent tests (SCIP via
-rust-analyzer/scip-python/scip-typescript/scip-go; native probes via cargo,
-node, tsx, javac, gcc and g++; the real OpenTelemetry SDKs) skip when the
-toolchain is missing. The OpenTelemetry Java agent test needs a downloaded
-`opentelemetry-javaagent.jar` (`ARGUS_OTEL_JAVAAGENT`) and is not required for
-non-Java repos: the Java agent method-list derivation and SCIP-java only run
-when `.java` files or JVM findings are present, and `--otlp` is opt-in, so
-auditing a repo in another language never touches Java-specific code.
+The supplied regression fixtures and evaluation harness exercise known cases.
+Cases used to improve detectors are tuning data. Static detection, queue
+coverage, and model-generated proof are separate measurements. Development
+results do not establish recall on unseen repositories or an advantage over
+a plain model audit. Local benchmark targets, answer keys, and raw audit
+conversations are excluded from the current release tree. Materials committed
+previously remain accessible in Git history; those answers are development data.
+
+Run workloads and reproductions against mocks or sandboxes in a disposable
+environment. The plugin's guardrails are not an operating-system sandbox;
+never provide production credentials, live exchanges, or shared databases.
+
+## Development
+
+```sh
+python -m pip install -r plugins/argus/requirements.txt -r tests/fixtures/main_py_comparison/requirements.txt
+python -m pytest tests -q
+```
+
+Tests requiring compilers, runtimes, SCIP indexers, or OpenTelemetry agents skip
+when those dependencies are unavailable. CI runs the core suite on Linux,
+macOS, and Windows with Python 3.12. The evaluation harness has separate
+dependencies in `tests/eval/requirements.txt`.
+
+Start with [AGENTS.md](AGENTS.md), the [audit workflow](plugins/argus/skills/audit/SKILL.md),
+and the [investigation guide](plugins/argus/skills/audit-investigate/SKILL.md).
+Implementation lives in `plugins/argus/scripts/auditor/`; language specs and
+rules are under `langs/`, runtime adapters under `trace/`, and reproduction
+support under `repro/`.
