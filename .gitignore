@@ -1,9 +1,42 @@
+# Local evidence, launch drafts, backups, and private evaluation material.
 .audit/
 .audit-eval/
+/.local/
+/audit-comparison-main-py/
+/benchmarks/relaybench/
+/tests/test_relaybench.py
+/tests/eval/MAIN_PY_COMPARISON.md
+/PLAN.md
+
+# Independent repositories and old generated skill packages.
+/rug_advisor/
+/swapper2_rust_code/
+/argus-audit/
+/argus-audit.zip
+
+# Environments, build products, and tool caches.
+.venv/
+venv/
 __pycache__/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 target/
+node_modules/
 tests/eval/.cache/
+/eval-summary.json
 
-rug_advisor/
-swapper2_rust_code/
+# Credentials and generated distribution archives.
+.env
+.env.*
+!.env.example
+!.env.sample
+*.zip
+*.tar.gz
+*.tgz
+*.7z
+*.bundle
+.DS_Store
+Thumbs.db

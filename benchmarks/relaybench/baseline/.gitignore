@@ -1,5 +1,0 @@
-.audit/
-__pycache__/
-target/
-data/
-*.sqlite

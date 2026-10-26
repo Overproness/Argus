@@ -1,4 +1,4 @@
-# Ground-truth cases for measuring Argus's recall and false-positive rate (PLAN.md, Evaluation corpus).
+# Ground-truth cases for Argus's static recall and targeted false-positive checks.
 #
 # Two kinds of entry:
 #   local  a fixture already in this repo (tests/fixtures/...). Fast, offline, always available; used to

@@ -43,7 +43,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
 
-  # Ground-truth recall/false-positive check (PLAN.md's evaluation corpus). Runs nightly and on demand,
+  # Ground-truth recall/false-positive check (tests/eval/corpus.yaml). Runs nightly and on demand,
   # not on every push: `kind: git` cases clone a real repository, which is slow and needs steady network
   # (this repo's own dev sandbox found large downloads flaky; a hosted runner should not have that problem).
   eval:
